@@ -1,0 +1,269 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global safety net - default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-+]+$');
+    }
+
+    function isValidDisplayId(id) {
+      return id is string && id.size() == 4 && id.matches('^[A-Z][0-9][A-Z][0-9]$');
+    }
+
+    function isWhitelistedManager() {
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/manager_whitelist/$(request.auth.token.email.lower())) && 
+             get(/databases/$(database)/documents/manager_whitelist/$(request.auth.token.email.lower())).data.status == 'APPROVED';
+    }
+
+    function isTenantOwner(managerId) {
+      return isSignedIn() && request.auth.uid == managerId && isWhitelistedManager();
+    }
+
+    // Manager Whitelist Rules
+    match /manager_whitelist/{emailId} {
+      allow get: if isSignedIn() && request.auth.token.email.lower() == emailId.lower();
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
+    // Manager Access Requests Rules
+    match /manager_access_requests/{requestId} {
+      allow create: if isSignedIn() && request.resource.data.email.lower() == request.auth.token.email.lower() && isValidId(requestId);
+      allow get: if isSignedIn() && (resource.data.email.lower() == request.auth.token.email.lower() || resource.data.firebaseUid == request.auth.uid);
+      allow list: if false;
+      allow update, delete: if false;
+    }
+
+    // Tenant Manager Profile
+    match /tenants/{tenantId} {
+      allow get: if isTenantOwner(tenantId);
+      allow list: if false; // Disallow cross-tenant listing of manager directories
+      allow create: if isTenantOwner(tenantId) && isValidId(tenantId);
+      allow update: if isTenantOwner(tenantId);
+      allow delete: if false;
+    }
+
+    // CRM Contacts
+    match /contacts/{contactId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(contactId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // CRM Groups
+    match /groups/{groupId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(groupId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Chit Funds / Schemes
+    match /funds/{fundId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(fundId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Fund Shares Allotment
+    match /shares/{shareId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(shareId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Monthly Cycles / Auctions
+    match /cycles/{cycleId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(cycleId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Authoritative Share x Cycle Billing Obligations
+    match /billings/{billingId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(billingId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid
+                    && request.resource.data.fundId == resource.data.fundId
+                    && request.resource.data.cycleId == resource.data.cycleId
+                    && request.resource.data.shareId == resource.data.shareId
+                    && request.resource.data.billingId == resource.data.billingId;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Authoritative Member Payout Financial Events
+    match /payouts/{payoutId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(payoutId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid
+                    && request.resource.data.payoutId == resource.data.payoutId
+                    && request.resource.data.fundId == resource.data.fundId
+                    && request.resource.data.cycleId == resource.data.cycleId
+                    && request.resource.data.shareId == resource.data.shareId
+                    && request.resource.data.memberId == resource.data.memberId;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Payment Source Records - Immutable & Idempotent Uniqueness Enforcement (R-1)
+    match /payments/{paymentId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(paymentId);
+      allow update: if false; // Immutable once recorded - prevents duplicate overwrite / ensures database-level idempotency
+      allow delete: if false; // Immutable financial trail
+    }
+
+    // Payment Allocations
+    match /allocations/{allocationId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(allocationId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Financial Transactions
+    match /transactions/{transactionId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(transactionId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Treasury Records
+    match /treasury/{recordId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(recordId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Materialized Chitti & Manager Ledgers
+    match /ledgers/{ledgerId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(ledgerId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Marketing Campaigns
+    match /campaigns/{campaignId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(campaignId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Communication Dispatches (Tenant-isolated execution tracking)
+    match /dispatches/{dispatchId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(dispatchId);
+      allow update: if isTenantOwner(resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // Immutable Audit Trail with Server-Authoritative Timestamp (R-4)
+    match /audits/{auditId} {
+      allow get: if isTenantOwner(resource.data.managerId);
+      allow list: if isTenantOwner(resource.data.managerId);
+      allow create: if isTenantOwner(request.resource.data.managerId)
+                    && request.resource.data.actorUid == request.auth.uid
+                    && request.resource.data.createdAt == request.time
+                    && isValidId(auditId);
+      allow update, delete: if false; // Append-only immutable trail
+    }
+
+    // Cryptographic Member Portal Tokens (Read-Only Passbook Projections)
+    match /portal_tokens/{token} {
+      // Any member possessing the specific unguessable 128-bit UUID token can read their own passbook document
+      allow get: if isValidId(token);
+      // Deny listing all tokens to prevent brute-force enumeration
+      allow list: if false;
+      // Only authenticated manager can create/revoke portal tokens
+      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(token);
+      allow update: if isTenantOwner(request.resource.data.managerId) 
+                    && request.resource.data.managerId == resource.data.managerId
+                    && request.resource.data.managerId == request.auth.uid;
+      allow delete: if isTenantOwner(resource.data.managerId);
+    }
+
+    // System-Wide Persistent Display ID Registry (Section 12)
+    match /display_id_registry/{displayId} {
+      // Any authenticated manager can read a display ID to verify availability or resolve entities
+      allow get: if isSignedIn() && isValidDisplayId(displayId);
+      // Managers can only list their own registered display IDs
+      allow list: if isSignedIn() && resource.data.managerId == request.auth.uid;
+      // Atomic reservation: only if valid format, ACTIVE status, and owned by the requesting manager
+      allow create: if isTenantOwner(request.resource.data.managerId)
+                    && isValidDisplayId(displayId)
+                    && request.resource.data.displayId == displayId
+                    && request.resource.data.entityType in ['FUND', 'SHARE']
+                    && request.resource.data.status == 'ACTIVE'
+                    && request.resource.data.managerId == request.auth.uid;
+      // Updates are strictly restricted to retiring an ID on entity deletion; never allowed to change owner or un-retire
+      allow update: if isTenantOwner(resource.data.managerId)
+                    && request.resource.data.displayId == resource.data.displayId
+                    && request.resource.data.entityType == resource.data.entityType
+                    && request.resource.data.entityId == resource.data.entityId
+                    && request.resource.data.managerId == resource.data.managerId
+                    && resource.data.status == 'ACTIVE'
+                    && request.resource.data.status == 'RETIRED'
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'retiredAt', 'retiredReason']);
+      // Consumed IDs are permanent and can NEVER be deleted
+      allow delete: if false;
+    }
+
+  }
+}

@@ -1,0 +1,431 @@
+{
+  "entities": {
+    "tenant": {
+      "title": "Tenant",
+      "description": "Manager tenant profile and operational defaults",
+      "type": "object",
+      "properties": {
+        "managerId": { "type": "string" },
+        "authUid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "currency": { "type": "string" },
+        "defaultCommissionPercent": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["managerId", "authUid", "name"]
+    },
+    "contact": {
+      "title": "Contact",
+      "description": "CRM member and prospect contact record",
+      "type": "object",
+      "properties": {
+        "contactId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "address": { "type": "string" },
+        "notes": { "type": "string" },
+        "communicationStatus": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["contactId", "managerId", "name", "phone"]
+    },
+    "group": {
+      "title": "Group",
+      "description": "Contact segment group",
+      "type": "object",
+      "properties": {
+        "groupId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "memberIds": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["groupId", "managerId", "name"]
+    },
+    "fund": {
+      "title": "Fund",
+      "description": "Chit fund scheme and rotation structure",
+      "type": "object",
+      "properties": {
+        "fundId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundName": { "type": "string" },
+        "totalPool": { "type": "number" },
+        "numberOfShares": { "type": "number" },
+        "totalMonths": { "type": "number" },
+        "currentMonth": { "type": "number" },
+        "cycleFrequency": { "type": "string" },
+        "commissionPercent": { "type": "number" },
+        "startDate": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["fundId", "managerId", "fundName", "totalPool", "totalMonths", "numberOfShares"]
+    },
+    "share": {
+      "title": "Share",
+      "description": "Individual member share allotment in a fund",
+      "type": "object",
+      "properties": {
+        "shareId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "memberId": { "type": "string" },
+        "memberName": { "type": "string" },
+        "memberPhone": { "type": "string" },
+        "shareNumber": { "type": "number" },
+        "shareCount": { "type": "number" },
+        "hasClaimedPrize": { "type": "boolean" },
+        "wonMonth": { "type": "number" },
+        "status": { "type": "string" },
+        "totalBilled": { "type": "number" },
+        "totalPaid": { "type": "number" },
+        "arrears": { "type": "number" },
+        "advance": { "type": "number" },
+        "portalToken": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["shareId", "managerId", "fundId", "memberId", "shareNumber"]
+    },
+    "cycle": {
+      "title": "Cycle",
+      "description": "Fund monthly cycle installment and auction state",
+      "type": "object",
+      "properties": {
+        "cycleId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "cycleNumber": { "type": "number" },
+        "monthIndex": { "type": "number" },
+        "auctionDate": { "type": "string" },
+        "winningBidAmount": { "type": "number" },
+        "winnerShareId": { "type": "string" },
+        "winnerMemberId": { "type": "string" },
+        "winnerMemberName": { "type": "string" },
+        "organizerCommission": { "type": "number" },
+        "dividendPool": { "type": "number" },
+        "dividendPerShare": { "type": "number" },
+        "grossInstallment": { "type": "number" },
+        "netInstallmentDue": { "type": "number" },
+        "winnerNetPayout": { "type": "number" },
+        "isAuctionClosed": { "type": "boolean" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "finalizedAt": { "type": "string" }
+      },
+      "required": ["cycleId", "managerId", "fundId", "cycleNumber"]
+    },
+    "payment": {
+      "title": "Payment",
+      "description": "Historical payment source record",
+      "type": "object",
+      "properties": {
+        "paymentId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "memberId": { "type": "string" },
+        "shareId": { "type": "string" },
+        "cycleNumber": { "type": "number" },
+        "amount": { "type": "number" },
+        "paymentDate": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "reference": { "type": "string" },
+        "notes": { "type": "string" },
+        "receiptFileUrl": { "type": "string" },
+        "verificationStatus": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["paymentId", "managerId", "fundId", "memberId", "amount", "paymentDate"]
+    },
+    "allocation": {
+      "title": "Allocation",
+      "description": "Payment installment breakdown allocation",
+      "type": "object",
+      "properties": {
+        "allocationId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "paymentId": { "type": "string" },
+        "cycleNumber": { "type": "number" },
+        "amount": { "type": "number" },
+        "type": { "type": "string" }
+      },
+      "required": ["allocationId", "managerId", "amount", "type"]
+    },
+    "transaction": {
+      "title": "Transaction",
+      "description": "Financial debit or credit ledger movement",
+      "type": "object",
+      "properties": {
+        "transactionId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["transactionId", "managerId", "amount", "type", "timestamp"]
+    },
+    "treasury": {
+      "title": "Treasury",
+      "description": "Cash flow and liquidity position snapshot",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "balance": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["recordId", "managerId", "balance"]
+    },
+    "campaign": {
+      "title": "Campaign",
+      "description": "CRM marketing message campaign",
+      "type": "object",
+      "properties": {
+        "campaignId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "channels": { "type": "array", "items": { "type": "string" } },
+        "channel": { "type": "string" },
+        "recipientCount": { "type": "number" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["campaignId", "managerId", "title", "message"]
+    },
+    "auditRecord": {
+      "title": "AuditRecord",
+      "description": "Immutable audit trail event",
+      "type": "object",
+      "properties": {
+        "auditId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "action": { "type": "string" },
+        "entityType": { "type": "string" },
+        "entityId": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "reason": { "type": "string" },
+        "beforeState": { "type": "string" },
+        "afterState": { "type": "string" }
+      },
+      "required": ["auditId", "managerId", "action", "entityType", "entityId", "timestamp"]
+    },
+    "ledger": {
+      "title": "MaterializedLedger",
+      "description": "Materialized Chitti and Manager ledger states",
+      "type": "object",
+      "properties": {
+        "ledgerId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "ledgerType": { "type": "string" },
+        "totalPool": { "type": "number" },
+        "totalCollected": { "type": "number" },
+        "totalDisbursed": { "type": "number" },
+        "totalArrears": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["ledgerId", "managerId", "ledgerType"]
+    },
+    "portalToken": {
+      "title": "PortalToken",
+      "description": "Cryptographic self-service member passbook token projection",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "shareId": { "type": "string" },
+        "memberName": { "type": "string" },
+        "shareNumber": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["token", "managerId", "fundId", "shareId"]
+    },
+    "billing": {
+      "title": "Billing",
+      "description": "Authoritative Share x Cycle operational billing obligation",
+      "type": "object",
+      "properties": {
+        "billingId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "shareId": { "type": "string" },
+        "billAmount": { "type": "number" },
+        "billAmountPaise": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "version": { "type": "number" }
+      },
+      "required": ["billingId", "managerId", "fundId", "cycleId", "shareId", "billAmountPaise"]
+    },
+    "payout": {
+      "title": "Payout",
+      "description": "Authoritative member payout financial event",
+      "type": "object",
+      "properties": {
+        "payoutId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "fundId": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "shareId": { "type": "string" },
+        "memberId": { "type": "string" },
+        "amount": { "type": "number" },
+        "amountPaise": { "type": "number" },
+        "payoutDate": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "reference": { "type": "string" },
+        "notes": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "idempotencyKey": { "type": "string" }
+      },
+      "required": ["payoutId", "managerId", "fundId", "cycleId", "shareId", "amountPaise", "status"]
+    },
+    "managerWhitelist": {
+      "title": "ManagerWhitelist",
+      "description": "Manual administrative approved managers collection",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "managerName": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED", "SUSPENDED", "REVOKED"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["email", "status"]
+    },
+    "managerAccessRequest": {
+      "title": "ManagerAccessRequest",
+      "description": "User requested manager permissions and access record",
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string" },
+        "email": { "type": "string" },
+        "firebaseUid": { "type": "string" },
+        "phone": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["requestId", "email", "firebaseUid", "phone", "status"]
+    },
+    "displayIdRegistry": {
+      "title": "DisplayIdRegistry",
+      "description": "System-wide persistent registry for reserving unique 4-character display IDs across Funds and Shares",
+      "type": "object",
+      "properties": {
+        "displayId": { "type": "string", "pattern": "^[A-Z][0-9][A-Z][0-9]$" },
+        "entityType": { "type": "string", "enum": ["FUND", "SHARE"] },
+        "entityId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "RETIRED"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "retiredAt": { "type": "string" },
+        "retiredReason": { "type": "string" }
+      },
+      "required": ["displayId", "entityType", "entityId", "managerId", "status"]
+    }
+  },
+  "firestore": {
+    "/display_id_registry/{displayId}": {
+      "schema": "displayIdRegistry",
+      "description": "System-wide registry mapping 4-character display IDs to entities"
+    },
+    "/manager_whitelist/{emailId}": {
+      "schema": "managerWhitelist",
+      "description": "Whitelist collection of approved managers"
+    },
+    "/manager_access_requests/{requestId}": {
+      "schema": "managerAccessRequest",
+      "description": "Access requests of pending approval managers"
+    },
+    "/tenants/{tenantId}": {
+      "schema": "tenant",
+      "description": "Tenant manager configurations"
+    },
+    "/contacts/{contactId}": {
+      "schema": "contact",
+      "description": "CRM contacts directory"
+    },
+    "/groups/{groupId}": {
+      "schema": "group",
+      "description": "Contact segment groups"
+    },
+    "/funds/{fundId}": {
+      "schema": "fund",
+      "description": "Chit funds master collection"
+    },
+    "/shares/{shareId}": {
+      "schema": "share",
+      "description": "Member share allotments"
+    },
+    "/cycles/{cycleId}": {
+      "schema": "cycle",
+      "description": "Monthly auction cycles"
+    },
+    "/billings/{billingId}": {
+      "schema": "billing",
+      "description": "Authoritative Share x Cycle billing obligations"
+    },
+    "/payouts/{payoutId}": {
+      "schema": "payout",
+      "description": "Authoritative member payout financial events"
+    },
+    "/payments/{paymentId}": {
+      "schema": "payment",
+      "description": "Recorded member payments"
+    },
+    "/allocations/{allocationId}": {
+      "schema": "allocation",
+      "description": "Payment installment breakdown allocations"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "transaction",
+      "description": "Financial debit/credit transaction records"
+    },
+    "/treasury/{recordId}": {
+      "schema": "treasury",
+      "description": "Treasury balance records"
+    },
+    "/ledgers/{ledgerId}": {
+      "schema": "ledger",
+      "description": "Materialized ledger positions"
+    },
+    "/campaigns/{campaignId}": {
+      "schema": "campaign",
+      "description": "Marketing outreach campaigns"
+    },
+    "/audits/{auditId}": {
+      "schema": "auditRecord",
+      "description": "Financial operation audit records"
+    },
+    "/portal_tokens/{token}": {
+      "schema": "portalToken",
+      "description": "Member passbook tokenized projection"
+    }
+  }
+}

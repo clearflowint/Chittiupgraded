@@ -1,0 +1,6 @@
+{
+  "name": "Manager Dashboard - Chitti & Financial Operations",
+  "description": "Production-grade multi-tenant chit fund, rotating savings, and financial operations SaaS platform with offline sync, PWA, and comprehensive ledger management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
