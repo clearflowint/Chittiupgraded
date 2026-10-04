@@ -12,7 +12,9 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
   const { createFund } = useChitFund();
 
   const [fundName, setFundName] = useState('');
-  const [cycleFrequency, setCycleFrequency] = useState<string>('none');
+  const [cycleFrequency, setCycleFrequency] = useState<'monthly' | 'bi-weekly' | 'weekly' | 'none'>('monthly');
+  const [planningDuration, setPlanningDuration] = useState<'1-year' | '6-months' | 'ongoing' | 'custom'>('1-year');
+  const [customCycles, setCustomCycles] = useState<number>(12);
   const [startDate, setStartDate] = useState('');
   const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(false);
@@ -34,7 +36,9 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
   useEffect(() => {
     if (isOpen) {
       setFundName('');
-      setCycleFrequency('none');
+      setCycleFrequency('monthly');
+      setPlanningDuration('1-year');
+      setCustomCycles(12);
       setStartDate('');
       setNotes('');
       setError(null);
@@ -54,24 +58,29 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
     setError(null);
   };
 
+  const resolvedPlannedCycles = planningDuration === '6-months'
+    ? 6
+    : planningDuration === '1-year'
+    ? 12
+    : planningDuration === 'custom'
+    ? Math.max(1, customCycles)
+    : null;
+
   const handleConfirmSubmit = async () => {
     setLoading(true);
     setError(null);
 
-    // Determine total cycles metadata depending on selected frequency duration
-    const plannedCyclesVal = cycleFrequency === '6-months' ? 6 : (cycleFrequency === '1-year' ? 12 : null);
-
     try {
       const newId = await createFund({
         fundName: fundName.trim(),
-        cycleFrequency: cycleFrequency === 'none' ? undefined : (cycleFrequency as any),
+        cycleFrequency: cycleFrequency === 'none' ? undefined : cycleFrequency,
         startDate: startDate || undefined,
         notes: notes.trim(),
-        memberList: [], // Start with 0 members
+        memberList: [], // Start with 0 members (dynamic share allotment)
         totalPool: 0,   // Managed dynamically
         numberOfShares: 0, // Managed dynamically
         commissionPercent: 5, // Default metadata
-        totalCycles: plannedCyclesVal,
+        totalCycles: resolvedPlannedCycles,
       });
 
       setLoading(false);
@@ -145,23 +154,55 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
                 />
               </div>
 
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
-                  Cycle Frequency (Optional)
-                </label>
-                <select
-                  value={cycleFrequency}
-                  onChange={(e: any) => setCycleFrequency(e.target.value)}
-                  className="w-full px-4 py-3 text-base sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-medium bg-white transition-all min-h-[48px]"
-                >
-                  <option value="none">-- Not Specified / Optional --</option>
-                  <option value="6-months">6 Months</option>
-                  <option value="1-year">1 Year</option>
-                  <option value="monthly">Monthly</option>
-                  <option value="bi-weekly">Bi-Weekly</option>
-                  <option value="weekly">Weekly</option>
-                </select>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
+                    Cycle Frequency
+                  </label>
+                  <select
+                    value={cycleFrequency}
+                    onChange={(e) => setCycleFrequency(e.target.value as any)}
+                    className="w-full px-4 py-3 text-base sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-medium bg-white transition-all min-h-[48px]"
+                  >
+                    <option value="monthly">Monthly</option>
+                    <option value="bi-weekly">Bi-Weekly</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="none">On-Demand / Flexible</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
+                    Target Tenure (Metadata)
+                  </label>
+                  <select
+                    value={planningDuration}
+                    onChange={(e) => setPlanningDuration(e.target.value as any)}
+                    className="w-full px-4 py-3 text-base sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-medium bg-white transition-all min-h-[48px]"
+                  >
+                    <option value="1-year">1 Year (12 Cycles)</option>
+                    <option value="6-months">6 Months (6 Cycles)</option>
+                    <option value="custom">Custom Count</option>
+                    <option value="ongoing">Open-Ended / Dynamic</option>
+                  </select>
+                </div>
               </div>
+
+              {planningDuration === 'custom' && (
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
+                    Planned Cycle Count
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={customCycles}
+                    onChange={(e) => setCustomCycles(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="w-full px-4 py-3 text-base sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-mono-nums min-h-[48px]"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
@@ -229,7 +270,13 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
                     </div>
                     <div className="flex justify-between items-center py-2 border-b border-slate-50">
                       <span className="text-[10px] font-bold text-slate-400 uppercase">Cycle Strategy</span>
-                      <span className="text-sm font-bold text-slate-700 capitalize text-right">{cycleFrequency === 'none' ? 'On-Demand / None' : cycleFrequency}</span>
+                      <span className="text-sm font-bold text-slate-700 capitalize text-right">{cycleFrequency === 'none' ? 'On-Demand / Flexible' : cycleFrequency}</span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b border-slate-50">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase">Target Tenure</span>
+                      <span className="text-sm font-bold text-slate-700 text-right">
+                        {resolvedPlannedCycles ? `${resolvedPlannedCycles} Cycles` : 'Open-Ended'}
+                      </span>
                     </div>
                     <div className="flex justify-between items-center py-2">
                       <span className="text-[10px] font-bold text-slate-400 uppercase">Inception Date</span>

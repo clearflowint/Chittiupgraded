@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useChitFund } from '../../context/ChitFundContext';
-import { FinancialEngine } from '../../services/financialEngine';
+import { FinancialEngine, UniversalFinancialCore } from '../../services/financialEngine';
 import { Fund, Share, PaymentMethod } from '../../types';
 import { X, CreditCard, PlusCircle, MinusCircle, AlertCircle, CheckCircle2 } from 'lucide-react';
 
@@ -21,7 +21,7 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
   initialShareId,
 }) => {
   const { tenant } = useAuth();
-  const { recordPayment, showAcknowledgement } = useChitFund();
+  const { recordPayment, showAcknowledgement, isOnline } = useChitFund();
 
   const [selectedShareId, setSelectedShareId] = useState<string>(initialShareId || (shares[0]?.shareId || ''));
   const [recordType, setRecordType] = useState<'credit' | 'debit'>('credit');
@@ -31,6 +31,13 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
   const [reference, setReference] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [formSessionId, setFormSessionId] = useState<string>(() => FinancialEngine.generateCryptoToken());
+
+  useEffect(() => {
+    if (isOpen) {
+      setFormSessionId(FinancialEngine.generateCryptoToken());
+    }
+  }, [isOpen, selectedShareId]);
 
   if (!isOpen) return null;
 
@@ -63,8 +70,8 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
 
     try {
       const type = recordType.toUpperCase() as 'CREDIT' | 'DEBIT';
-      const idempotencyKey = `pay_${fund.fundId}_${selectedShareId}_${Date.now()}`;
-      const finalReference = reference || `${type}-${Date.now().toString().slice(-6)}`;
+      const idempotencyKey = `pay_${fund.fundId}_${selectedShareId}_${formSessionId}`;
+      const finalReference = reference.trim() || `${type}-${formSessionId.slice(0, 6).toUpperCase()}`;
 
       await recordPayment({
         fundId: fund.fundId,
@@ -328,13 +335,20 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
               >
                 Cancel
               </button>
-              <button
-                type="submit"
-                disabled={loading}
-                className="py-3 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-50 transition cursor-pointer shadow-md min-h-[48px]"
-              >
-                {loading ? 'Recording...' : 'Record Payment'}
-              </button>
+              <div className="flex flex-col">
+                <button
+                  type="submit"
+                  disabled={loading || !isOnline}
+                  className="w-full py-3 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-50 transition cursor-pointer shadow-md min-h-[48px]"
+                >
+                  {!isOnline ? 'Online Required' : loading ? 'Recording...' : 'Record Payment'}
+                </button>
+                {!isOnline && (
+                  <span className="text-[9px] text-rose-500 font-bold text-center mt-1">
+                    Internet connection required
+                  </span>
+                )}
+              </div>
             </div>
           </form>
         </div>

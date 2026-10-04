@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import { 
   collection, 
   query, 
@@ -41,7 +41,8 @@ import {
   PaginatedResult,
   FinalReportSnapshot
 } from '../types';
-import { localDb, QueuedOfflineMutation } from '../services/localDb';
+import { localDb } from '../services/localDb';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { FinancialEngine, UniversalFinancialCore, FinancialEvent } from '../services/financialEngine';
 import { ImpactEngine } from '../services/impactEngine';
 import { CommunicationDispatcher } from '../services/communicationDispatcher';
@@ -69,9 +70,10 @@ interface ChitFundContextType {
   campaigns: Campaign[];
   audits: AuditRecord[];
   ledgers: MaterializedLedger[];
+  managerLedger: MaterializedLedger;
   loading: boolean;
   activeFund: Fund | null;
-  pendingOfflineCount: number;
+  isOnline: boolean;
   acknowledgementState: AcknowledgementResult;
   showAcknowledgement: (data: Omit<AcknowledgementResult, 'isOpen'>) => void;
   closeAcknowledgement: () => void;
@@ -213,6 +215,23 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const authUid = tenant?.authUid;
   const actorUid = tenant?.authUid || tenant?.managerId || '';
 
+  const isOnline = useOnlineStatus();
+
+  const verifyOnline = useCallback(() => {
+    if (!isOnline) {
+      throw new Error('Action failed: Offline mode is active. An internet connection is required to make changes.');
+    }
+  }, [isOnline]);
+
+  const withOnlineGuard = <Args extends any[], Ret>(
+    fn: (...args: Args) => Promise<Ret>
+  ): ((...args: Args) => Promise<Ret>) => {
+    return async (...args: Args): Promise<Ret> => {
+      verifyOnline();
+      return fn(...args);
+    };
+  };
+
   const [funds, setFunds] = useState<Fund[]>([]);
   const [shares, setShares] = useState<Share[]>([]);
   const [cycles, setCycles] = useState<Cycle[]>([]);
@@ -227,8 +246,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [ledgers, setLedgers] = useState<MaterializedLedger[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeFundId, setActiveFundId] = useState<string | null>(null);
-  const [pendingOfflineCount, setPendingOfflineCount] = useState<number>(0);
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
   const seenCompletedDispatchesRef = React.useRef<Set<string>>(new Set());
 
@@ -304,7 +321,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       notificationService.setTenant(managerId);
 
-      const [cFunds, cShares, cCycles, cBillings, cPayouts, cPayments, cContacts, cGroups, cCampaigns, cDispatches, cAudits, cLedgers, pending] =
+      const [cFunds, cShares, cCycles, cBillings, cPayouts, cPayments, cContacts, cGroups, cCampaigns, cDispatches, cAudits, cLedgers] =
         await Promise.all([
           localDb.getAllForTenant<Fund>(managerId, 'funds'),
           localDb.getAllForTenant<Share>(managerId, 'shares'),
@@ -318,7 +335,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           localDb.getAllForTenant<CommunicationDispatch>(managerId, 'dispatches'),
           localDb.getAllForTenant<AuditRecord>(managerId, 'audits'),
           localDb.getAllForTenant<MaterializedLedger>(managerId, 'ledgers'),
-          localDb.getPendingMutations(managerId),
         ]);
 
       if (cFunds.length > 0) setFunds(cFunds);
@@ -346,108 +362,9 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
       if (cAudits.length > 0) setAudits(cAudits);
       if (cLedgers.length > 0) setLedgers(cLedgers);
-      setPendingOfflineCount(pending.length);
     }
     loadTenantCache();
   }, [managerId]);
-
-  // 2. Offline Queue Replay Worker: Executes queued mutations when connectivity resumes
-  const syncOfflineQueue = useCallback(async () => {
-    if (!managerId || typeof navigator === 'undefined' || !navigator.onLine || isSyncing) return;
-
-    // 1. Cross-tab Concurrency Lock
-    const hasLock = await localDb.acquireSyncLock(managerId);
-    if (!hasLock) return;
-
-    setIsSyncing(true);
-    try {
-      // 2. Fetch pending mutations (Ordered by timestamp via Index)
-      const pending = await localDb.getPendingMutations(managerId);
-      if (pending.length === 0) {
-        await localDb.releaseSyncLock(managerId);
-        setIsSyncing(false);
-        return;
-      }
-
-      console.log(`Replaying ${pending.length} offline mutations for tenant ${managerId} in chronological order...`);
-
-      for (const item of pending) {
-        try {
-          // Enforce strict tenant boundary
-          if (item.managerId !== managerId || (authUid && item.authUid && item.authUid !== authUid)) {
-            console.warn('Dropping queued mutation with tenant/auth mismatch:', item.operationId);
-            await localDb.removeQueuedMutation(managerId, item.operationId);
-            continue;
-          }
-
-          await localDb.updateMutationStatus(managerId, item.operationId, 'processing');
-
-          const targetRef = doc(db, item.collection, item.docId);
-
-          // 3. Replay Logic with basic idempotency
-          if (item.type === 'batch') {
-            const batch = writeBatch(db);
-            for (const op of item.payload.operations || []) {
-              const opRef = doc(db, op.collection, op.docId);
-              if (op.action === 'set') batch.set(opRef, op.data);
-              else if (op.action === 'update') batch.update(opRef, op.data);
-              else if (op.action === 'delete') batch.delete(opRef);
-            }
-            await batch.commit();
-          } else {
-            if (item.collection === 'display_id_registry') {
-              // Authoritative transactional reservation with collision detection (Phase 2A.5)
-              await DisplayIdRegistryService.applyReplayReservation(item.payload);
-            } else if (item.type === 'set') {
-              // Idempotency: if creating a payment, it might already exist
-              await setDoc(targetRef, item.payload);
-            } else if (item.type === 'update') {
-              await setDoc(targetRef, item.payload, { merge: true });
-            } else if (item.type === 'delete') {
-              await deleteDoc(targetRef);
-            }
-          }
-
-          await localDb.removeQueuedMutation(managerId, item.operationId);
-        } catch (err: any) {
-          console.error(`Offline Replay Failure for ${item.operationId}:`, err);
-          
-          // Stop sequential replay if an error occurs to prevent dependent state corruption
-          // We mark as failed but keep in queue for manual retry or later reconciliation
-          await localDb.updateMutationStatus(managerId, item.operationId, 'failed', err?.message || String(err));
-          
-          // CRITICAL: Stop the loop. M2 must not execute if M1 failed.
-          break; 
-        }
-      }
-
-      const remaining = await localDb.getPendingMutations(managerId);
-      setPendingOfflineCount(remaining.length);
-      
-      if (remaining.length === 0) {
-        notificationService.send('Cloud Synchronization Complete', 'All offline financial changes have been securely committed.', 'sync');
-      } else {
-        const failedCount = remaining.filter(m => m.status === 'failed').length;
-        if (failedCount > 0) {
-          notificationService.send('Synchronization Interrupted', `${failedCount} items failed to sync. Check logs for details.`, 'sync');
-        }
-      }
-    } finally {
-      await localDb.releaseSyncLock(managerId);
-      setIsSyncing(false);
-    }
-  }, [managerId, authUid, isSyncing]);
-
-  useEffect(() => {
-    if (managerId && typeof navigator !== 'undefined' && navigator.onLine) {
-      syncOfflineQueue();
-    }
-  }, [managerId, syncOfflineQueue]);
-
-  useEffect(() => {
-    window.addEventListener('online', syncOfflineQueue);
-    return () => window.removeEventListener('online', syncOfflineQueue);
-  }, [syncOfflineQueue]);
 
   // 3. Firestore Real-Time Snapshot Listeners (Strictly Tenant-Scoped)
   useEffect(() => {
@@ -579,20 +496,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const recordDispatch = useCallback(async (dispatch: CommunicationDispatch) => {
     if (!managerId) return;
-    try {
-      await setDoc(doc(db, 'dispatches', dispatch.dispatchId), dispatch);
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid: authUid || managerId,
-        collection: 'dispatches',
-        docId: dispatch.dispatchId,
-        type: 'set',
-        payload: dispatch,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await setDoc(doc(db, 'dispatches', dispatch.dispatchId), dispatch);
     await localDb.put(managerId, 'dispatches', dispatch);
     setDispatches((prev) => {
       const existingIndex = prev.findIndex((d) => d.dispatchId === dispatch.dispatchId);
@@ -742,17 +646,17 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       shareNum++;
     }
 
-    // Materialized Chitti Ledger
-    const chittiLedger: MaterializedLedger = {
+    // Materialized Fund Ledger
+    const fundLedger: MaterializedLedger = {
       ledgerId: `ledger_${fundId}`,
       managerId,
       fundId,
-      ledgerType: 'CHITTI_LEDGER',
+      ledgerType: 'FUND_LEDGER',
       totalPool: pool,
       totalCollected: 0,
       totalDisbursed: 0,
       totalArrears: 0,
-      totalMembers: totalShares,
+      totalShares: totalShares,
       updatedAt: new Date().toISOString(),
     };
 
@@ -769,39 +673,17 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
 
     // Atomic commit
-    try {
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'funds', fundId), newFund);
-      for (const s of createdShares) batch.set(doc(db, 'shares', s.shareId), s);
-      for (const t of createdTokens) batch.set(doc(db, 'portal_tokens', t.token), t);
-      batch.set(doc(db, 'ledgers', chittiLedger.ledgerId), chittiLedger);
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (err) {
-      console.warn('Offline mode: queuing full fund creation batch:', err);
-      const operations: any[] = [
-        { action: 'set', collection: 'funds', docId: fundId, data: newFund }
-      ];
-      for (const s of createdShares) operations.push({ action: 'set', collection: 'shares', docId: s.shareId, data: s });
-      for (const t of createdTokens) operations.push({ action: 'set', collection: 'portal_tokens', docId: t.token, data: t });
-      operations.push({ action: 'set', collection: 'ledgers', docId: chittiLedger.ledgerId, data: chittiLedger });
-      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
-
-      await localDb.queueOfflineMutation({
-        operationId: fundId, // Deterministic fundId as operationId
-        managerId,
-        authUid,
-        collection: 'funds',
-        docId: fundId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'funds', fundId), newFund);
+    for (const s of createdShares) batch.set(doc(db, 'shares', s.shareId), s);
+    for (const t of createdTokens) batch.set(doc(db, 'portal_tokens', t.token), t);
+    batch.set(doc(db, 'ledgers', fundLedger.ledgerId), fundLedger);
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'funds', newFund);
     await localDb.putBatch(managerId, 'shares', createdShares);
-    await localDb.put(managerId, 'ledgers', chittiLedger);
+    await localDb.put(managerId, 'ledgers', fundLedger);
     await localDb.put(managerId, 'audits', audit);
 
     setFunds((prev) => [
@@ -814,8 +696,8 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ...prev.filter((s) => !createdShareIdSet.has(s.shareId))
     ]);
     setLedgers((prev) => [
-      chittiLedger,
-      ...prev.filter((l) => l.ledgerId !== chittiLedger.ledgerId)
+      fundLedger,
+      ...prev.filter((l) => l.ledgerId !== fundLedger.ledgerId)
     ]);
     setActiveFundId(fundId);
 
@@ -943,44 +825,15 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Added Share #${nextShareNumber} (${data.memberName}) to Fund ${fund.fundName}.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'shares', shareId), newShare);
-      batch.set(doc(db, 'portal_tokens', portalToken), tokenRecord);
-      batch.update(doc(db, 'funds', data.fundId), {
-        numberOfShares: updatedFund.numberOfShares,
-        updatedAt: updatedFund.updatedAt,
-      });
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing full addShare transaction batch:', e);
-      await localDb.queueOfflineMutation({
-        operationId: shareId, // Deterministic shareId (Phase 2A.5)
-        managerId,
-        authUid,
-        collection: 'shares',
-        docId: shareId,
-        type: 'batch',
-        payload: {
-          operations: [
-            { action: 'set', collection: 'shares', docId: shareId, data: newShare },
-            { action: 'set', collection: 'portal_tokens', docId: portalToken, data: tokenRecord },
-            { 
-              action: 'update', 
-              collection: 'funds', 
-              docId: data.fundId, 
-              data: {
-                numberOfShares: updatedFund.numberOfShares,
-                updatedAt: updatedFund.updatedAt,
-              }
-            },
-            { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
-          ]
-        },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'shares', shareId), newShare);
+    batch.set(doc(db, 'portal_tokens', portalToken), tokenRecord);
+    batch.update(doc(db, 'funds', data.fundId), {
+      numberOfShares: updatedFund.numberOfShares,
+      updatedAt: updatedFund.updatedAt,
+    });
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'shares', newShare);
     await localDb.put(managerId, 'funds', updatedFund);
@@ -1054,21 +907,18 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       };
       billingDocs.push(newBilling);
 
-      const otherCyclesBilled = billings
-        .filter(b => b.shareId === share.shareId && b.fundId === data.fundId)
-        .reduce((sum, b) => sum + b.billAmount, 0);
-
-      const newTotalBilled = otherCyclesBilled + billAmt;
-      const nextState = UniversalFinancialCore.calculateNextState(
-        {
-          totalBilled: otherCyclesBilled,
-          totalCredits: share.totalCredits,
-          totalDebits: share.totalDebits,
-          arrears: share.arrears,
-          advance: share.advance
-        },
-        { type: 'BILLING', amount: billAmt }
-      );
+      const otherBillings = billings.filter(b => b.shareId === share.shareId && b.fundId === data.fundId);
+      const sharePayments = payments.filter(p => p.shareId === share.shareId && p.fundId === data.fundId);
+      const events: FinancialEvent[] = [
+        ...otherBillings.map(b => ({ type: 'BILLING' as const, amount: b.billAmount, timestamp: b.createdAt })),
+        { type: 'BILLING' as const, amount: billAmt, timestamp: newBilling.createdAt },
+        ...sharePayments.map(p => ({
+          type: (p.type || 'CREDIT') as 'CREDIT' | 'DEBIT',
+          amount: p.amount,
+          timestamp: p.paymentDate
+        }))
+      ];
+      const nextState = UniversalFinancialCore.rebuildState(events);
 
       const updatedShare: Share = {
         ...share,
@@ -1122,78 +972,28 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Created Cycle #${nextCycleNum} ("${name}") for Fund ${fund.fundName}.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'cycles', cycleId), newCycle);
-      batch.update(doc(db, 'funds', data.fundId), {
-        currentCycle: updatedFund.currentCycle,
-        totalCycles: updatedFund.totalCycles,
-        updatedAt: updatedFund.updatedAt,
-      });
-      for (const b of billingDocs) {
-        batch.set(doc(db, 'billings', b.billingId), b);
-      }
-      for (const us of updatedShares) {
-        batch.update(doc(db, 'shares', us.shareId), {
-          totalBilled: us.totalBilled,
-          totalCredits: us.totalCredits,
-          totalDebits: us.totalDebits,
-          arrears: us.arrears,
-          advance: us.advance,
-          updatedAt: us.updatedAt,
-        });
-      }
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing full cycle creation batch:', e);
-      const operations: any[] = [
-        { action: 'set', collection: 'cycles', docId: cycleId, data: newCycle },
-        { 
-          action: 'update', 
-          collection: 'funds', 
-          docId: data.fundId, 
-          data: {
-            currentCycle: updatedFund.currentCycle,
-            totalCycles: updatedFund.totalCycles,
-            updatedAt: updatedFund.updatedAt,
-          }
-        }
-      ];
-
-      for (const b of billingDocs) {
-        operations.push({ action: 'set', collection: 'billings', docId: b.billingId, data: b });
-      }
-
-      for (const us of updatedShares) {
-        operations.push({
-          action: 'update',
-          collection: 'shares',
-          docId: us.shareId,
-          data: {
-            totalBilled: us.totalBilled,
-            totalCredits: us.totalCredits,
-            totalDebits: us.totalDebits,
-            arrears: us.arrears,
-            advance: us.advance,
-            updatedAt: us.updatedAt,
-          }
-        });
-      }
-
-      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
-
-      await localDb.queueOfflineMutation({
-        operationId: `create_cycle_${cycleId}`, // Deterministic cycleId (Phase 2A.5)
-        managerId,
-        authUid,
-        collection: 'cycles',
-        docId: cycleId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'cycles', cycleId), newCycle);
+    batch.update(doc(db, 'funds', data.fundId), {
+      currentCycle: updatedFund.currentCycle,
+      totalCycles: updatedFund.totalCycles,
+      updatedAt: updatedFund.updatedAt,
+    });
+    for (const b of billingDocs) {
+      batch.set(doc(db, 'billings', b.billingId), b);
     }
+    for (const us of updatedShares) {
+      batch.update(doc(db, 'shares', us.shareId), {
+        totalBilled: us.totalBilled,
+        totalCredits: us.totalCredits,
+        totalDebits: us.totalDebits,
+        arrears: us.arrears,
+        advance: us.advance,
+        updatedAt: us.updatedAt,
+      });
+    }
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'cycles', newCycle);
     await localDb.put(managerId, 'funds', updatedFund);
@@ -1277,21 +1077,21 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       };
       billingDocs.push(newBilling);
 
-      const otherCyclesBilled = billings
-        .filter(b => b.shareId === share.shareId && b.cycleId !== data.cycleId && b.fundId === data.fundId)
-        .reduce((sum, b) => sum + b.billAmount, 0);
+      const otherBillings = billings
+        .filter(b => b.shareId === share.shareId && b.cycleId !== data.cycleId && b.fundId === data.fundId);
+      const sharePayments = payments
+        .filter(p => p.shareId === share.shareId && p.fundId === data.fundId);
 
-      const newTotalBilled = otherCyclesBilled + billAmount;
-      const nextState = UniversalFinancialCore.calculateNextState(
-        {
-          totalBilled: otherCyclesBilled,
-          totalCredits: share.totalCredits,
-          totalDebits: share.totalDebits,
-          arrears: share.arrears,
-          advance: share.advance
-        },
-        { type: 'BILLING', amount: billAmount }
-      );
+      const events: FinancialEvent[] = [
+        ...otherBillings.map(b => ({ type: 'BILLING' as const, amount: b.billAmount, timestamp: b.createdAt })),
+        { type: 'BILLING' as const, amount: billAmount, timestamp: newBilling.createdAt },
+        ...sharePayments.map(p => ({
+          type: (p.type || 'CREDIT') as 'CREDIT' | 'DEBIT',
+          amount: p.amount,
+          timestamp: p.paymentDate
+        }))
+      ];
+      const nextState = UniversalFinancialCore.rebuildState(events);
 
       const updatedShare: Share = {
         ...share,
@@ -1314,10 +1114,11 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const totalCollected = updatedShares.reduce((a, s) => a + (s.totalCredits - s.totalDebits), 0);
     const totalArrears = updatedShares.reduce((a, s) => a + s.arrears, 0);
 
-    const chittiLedger = ledgers.find((l) => l.fundId === data.fundId && l.ledgerType === 'CHITTI_LEDGER');
-    const updatedLedger: MaterializedLedger | null = chittiLedger
+    const fundLedger = ledgers.find((l) => l.fundId === data.fundId && l.ledgerType === 'FUND_LEDGER');
+    const updatedLedger: MaterializedLedger | null = fundLedger
       ? {
-          ...chittiLedger,
+          ...fundLedger,
+          ledgerType: 'FUND_LEDGER',
           totalArrears,
           totalCollected,
           updatedAt: new Date().toISOString(),
@@ -1336,39 +1137,35 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Saved share bills for Cycle #${targetCycle.cycleNumber} (${targetCycle.cycleName || 'Current'}). Total cycle bills: ₹${totalCycleBillSum}.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      for (const b of billingDocs) {
-        batch.set(doc(db, 'billings', b.billingId), b);
-      }
-      batch.update(doc(db, 'cycles', data.cycleId), {
-        grossInstallment: updatedCycle.grossInstallment,
-        netInstallmentDue: updatedCycle.netInstallmentDue,
-        cycleName: updatedCycle.cycleName,
-        startDate: updatedCycle.startDate,
-        endDate: updatedCycle.endDate,
-        organizerCommission: updatedCycle.organizerCommission,
-      });
-      for (const s of updatedShares) {
-        batch.update(doc(db, 'shares', s.shareId), {
-          totalBilled: s.totalBilled,
-          arrears: s.arrears,
-          advance: s.advance,
-          updatedAt: s.updatedAt,
-        });
-      }
-      if (updatedLedger) {
-        batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
-          totalArrears: updatedLedger.totalArrears,
-          totalCollected: updatedLedger.totalCollected,
-          updatedAt: updatedLedger.updatedAt,
-        });
-      }
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Network bill update notice:', e);
+    const batch = writeBatch(db);
+    for (const b of billingDocs) {
+      batch.set(doc(db, 'billings', b.billingId), b);
     }
+    batch.update(doc(db, 'cycles', data.cycleId), {
+      grossInstallment: updatedCycle.grossInstallment,
+      netInstallmentDue: updatedCycle.netInstallmentDue,
+      cycleName: updatedCycle.cycleName,
+      startDate: updatedCycle.startDate,
+      endDate: updatedCycle.endDate,
+      organizerCommission: updatedCycle.organizerCommission,
+    });
+    for (const s of updatedShares) {
+      batch.update(doc(db, 'shares', s.shareId), {
+        totalBilled: s.totalBilled,
+        arrears: s.arrears,
+        advance: s.advance,
+        updatedAt: s.updatedAt,
+      });
+    }
+    if (updatedLedger) {
+      batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
+        totalArrears: updatedLedger.totalArrears,
+        totalCollected: updatedLedger.totalCollected,
+        updatedAt: updatedLedger.updatedAt,
+      });
+    }
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     setCycles((prev) => prev.map((c) => (c.cycleId === data.cycleId ? updatedCycle : c)));
     setBillings((prev) => {
@@ -1472,11 +1269,12 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       isAuctionClosed: true,
     };
 
-    const chittiLedger = ledgers.find((l) => l.fundId === data.fundId && l.ledgerType === 'CHITTI_LEDGER');
-    const updatedLedger: MaterializedLedger | null = chittiLedger
+    const fundLedger = ledgers.find((l) => l.fundId === data.fundId && l.ledgerType === 'FUND_LEDGER');
+    const updatedLedger: MaterializedLedger | null = fundLedger
       ? {
-          ...chittiLedger,
-          totalDisbursed: chittiLedger.totalDisbursed + data.payoutAmount,
+          ...fundLedger,
+          ledgerType: 'FUND_LEDGER',
+          totalDisbursed: fundLedger.totalDisbursed + data.payoutAmount,
           updatedAt: now,
         }
       : null;
@@ -1493,80 +1291,28 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Recorded payout of ₹${data.payoutAmount} for Share #${share.shareNumber} (${share.memberName}) in Cycle #${targetCycle.cycleNumber}.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'payouts', payoutId), newPayout);
-      batch.update(doc(db, 'shares', data.shareId), {
-        hasClaimedPrize: true,
-        wonCycleNumber: targetCycle.cycleNumber,
-        status: 'drawn',
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'payouts', payoutId), newPayout);
+    batch.update(doc(db, 'shares', data.shareId), {
+      hasClaimedPrize: true,
+      wonCycleNumber: targetCycle.cycleNumber,
+      status: 'drawn',
+      updatedAt: now,
+    });
+    batch.update(doc(db, 'cycles', data.cycleId), {
+      winnerShareId: share.shareId,
+      winnerMemberName: share.memberName,
+      winnerNetPayout: data.payoutAmount,
+      isAuctionClosed: true,
+    });
+    if (updatedLedger) {
+      batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
+        totalDisbursed: updatedLedger.totalDisbursed,
         updatedAt: now,
       });
-      batch.update(doc(db, 'cycles', data.cycleId), {
-        winnerShareId: share.shareId,
-        winnerMemberName: share.memberName,
-        winnerNetPayout: data.payoutAmount,
-        isAuctionClosed: true,
-      });
-      if (updatedLedger) {
-        batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
-          totalDisbursed: updatedLedger.totalDisbursed,
-          updatedAt: now,
-        });
-      }
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing full payout recording batch:', e);
-      const operations: any[] = [
-        { action: 'set', collection: 'payouts', docId: payoutId, data: newPayout },
-        { 
-          action: 'update', 
-          collection: 'shares', 
-          docId: data.shareId, 
-          data: {
-            hasClaimedPrize: true,
-            wonCycleNumber: targetCycle.cycleNumber,
-            status: 'drawn',
-            updatedAt: now,
-          }
-        },
-        {
-          action: 'update',
-          collection: 'cycles',
-          docId: data.cycleId,
-          data: {
-            winnerShareId: share.shareId,
-            winnerMemberName: share.memberName,
-            winnerNetPayout: data.payoutAmount,
-            isAuctionClosed: true,
-          }
-        }
-      ];
-      if (updatedLedger) {
-        operations.push({
-          action: 'update',
-          collection: 'ledgers',
-          docId: updatedLedger.ledgerId,
-          data: {
-            totalDisbursed: updatedLedger.totalDisbursed,
-            updatedAt: now,
-          }
-        });
-      }
-      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
-
-      await localDb.queueOfflineMutation({
-        operationId: cleanKey,
-        managerId,
-        authUid,
-        collection: 'payouts',
-        docId: payoutId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
     }
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     setPayouts((prev) => [...prev.filter((p) => p.payoutId !== newPayout.payoutId), newPayout]);
     setShares((prev) => prev.map((s) => (s.shareId === data.shareId ? updatedShare : s)));
@@ -1646,19 +1392,28 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updatedAt: now,
     };
 
+    // Check if there are other active payouts specifically for this target cycle
+    const otherCyclePayouts = payouts.filter(
+      (p) => p.cycleId === targetCycle.cycleId && p.payoutId !== payout.payoutId && p.status === 'disbursed'
+    );
+    const hasOtherCyclePayouts = otherCyclePayouts.length > 0;
+    const remainingPayoutShare = hasOtherCyclePayouts ? shares.find(s => s.shareId === otherCyclePayouts[0].shareId) : null;
+    const remainingCycleNetPayout = otherCyclePayouts.reduce((sum, p) => sum + p.amount, 0);
+
     const updatedCycle: Cycle = {
       ...targetCycle,
-      winnerShareId: null,
-      winnerMemberName: null,
-      winnerNetPayout: 0,
-      isAuctionClosed: false,
+      winnerShareId: hasOtherCyclePayouts ? (remainingPayoutShare?.shareId || otherCyclePayouts[0].shareId) : null,
+      winnerMemberName: hasOtherCyclePayouts ? (remainingPayoutShare?.memberName || null) : null,
+      winnerNetPayout: remainingCycleNetPayout,
+      isAuctionClosed: hasOtherCyclePayouts,
     };
 
-    const chittiLedger = ledgers.find((l) => l.fundId === data.fundId && l.ledgerType === 'CHITTI_LEDGER');
-    const updatedLedger: MaterializedLedger | null = chittiLedger
+    const fundLedger = ledgers.find((l) => l.fundId === data.fundId && l.ledgerType === 'FUND_LEDGER');
+    const updatedLedger: MaterializedLedger | null = fundLedger
       ? {
-          ...chittiLedger,
-          totalDisbursed: Math.max(0, chittiLedger.totalDisbursed - payout.amount),
+          ...fundLedger,
+          ledgerType: 'FUND_LEDGER',
+          totalDisbursed: Math.max(0, fundLedger.totalDisbursed - payout.amount),
           updatedAt: now,
         }
       : null;
@@ -1675,93 +1430,32 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Revoked payout of ₹${payout.amount} for Share #${share.shareNumber} (${share.memberName}) in Cycle #${targetCycle.cycleNumber}. Reason: ${data.reason || 'None'}.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'payouts', payout.payoutId), {
-        status: 'cancelled',
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'payouts', payout.payoutId), {
+      status: 'cancelled',
+      updatedAt: now,
+      updatedBy: authUid,
+    });
+    batch.update(doc(db, 'shares', share.shareId), {
+      hasClaimedPrize: updatedShare.hasClaimedPrize,
+      wonCycleNumber: updatedShare.wonCycleNumber,
+      status: updatedShare.status,
+      updatedAt: now,
+    });
+    batch.update(doc(db, 'cycles', targetCycle.cycleId), {
+      winnerShareId: updatedCycle.winnerShareId,
+      winnerMemberName: updatedCycle.winnerMemberName,
+      winnerNetPayout: updatedCycle.winnerNetPayout,
+      isAuctionClosed: updatedCycle.isAuctionClosed,
+    });
+    if (updatedLedger) {
+      batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
+        totalDisbursed: updatedLedger.totalDisbursed,
         updatedAt: now,
-        updatedBy: authUid,
       });
-      batch.update(doc(db, 'shares', share.shareId), {
-        hasClaimedPrize: updatedShare.hasClaimedPrize,
-        wonCycleNumber: updatedShare.wonCycleNumber,
-        status: updatedShare.status,
-        updatedAt: now,
-      });
-      batch.update(doc(db, 'cycles', targetCycle.cycleId), {
-        winnerShareId: null,
-        winnerMemberName: null,
-        winnerNetPayout: 0,
-        isAuctionClosed: false,
-      });
-      if (updatedLedger) {
-        batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
-          totalDisbursed: updatedLedger.totalDisbursed,
-          updatedAt: now,
-        });
-      }
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing full payout revocation batch:', e);
-      const operations: any[] = [
-        { 
-          action: 'update', 
-          collection: 'payouts', 
-          docId: payout.payoutId, 
-          data: {
-            status: 'cancelled',
-            updatedAt: now,
-            updatedBy: authUid,
-          }
-        },
-        {
-          action: 'update',
-          collection: 'shares',
-          docId: share.shareId,
-          data: {
-            hasClaimedPrize: updatedShare.hasClaimedPrize,
-            wonCycleNumber: updatedShare.wonCycleNumber,
-            status: updatedShare.status,
-            updatedAt: now,
-          }
-        },
-        {
-          action: 'update',
-          collection: 'cycles',
-          docId: targetCycle.cycleId,
-          data: {
-            winnerShareId: null,
-            winnerMemberName: null,
-            winnerNetPayout: 0,
-            isAuctionClosed: false,
-          }
-        }
-      ];
-      if (updatedLedger) {
-        operations.push({
-          action: 'update',
-          collection: 'ledgers',
-          docId: updatedLedger.ledgerId,
-          data: {
-            totalDisbursed: updatedLedger.totalDisbursed,
-            updatedAt: now,
-          }
-        });
-      }
-      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
-
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'payouts',
-        docId: payout.payoutId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
     }
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     setPayouts((prev) => prev.map((p) => (p.payoutId === payout.payoutId ? updatedPayout : p)));
     setShares((prev) => prev.map((s) => (s.shareId === share.shareId ? updatedShare : s)));
@@ -1827,44 +1521,15 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Updated Cycle #${targetCycle.cycleNumber} metadata: Name="${updatedCycle.cycleName}", Start="${newStart}", End="${newEnd || 'None'}".`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'cycles', data.cycleId), {
-        cycleName: updatedCycle.cycleName,
-        startDate: updatedCycle.startDate,
-        endDate: updatedCycle.endDate,
-        auctionDate: updatedCycle.auctionDate,
-      });
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing metadata update batch:', e);
-      const operations: any[] = [
-        { 
-          action: 'update', 
-          collection: 'cycles', 
-          docId: data.cycleId, 
-          data: {
-            cycleName: updatedCycle.cycleName,
-            startDate: updatedCycle.startDate,
-            endDate: updatedCycle.endDate,
-            auctionDate: updatedCycle.auctionDate,
-          } 
-        },
-        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
-      ];
-
-      await localDb.queueOfflineMutation({
-        operationId: `update_cycle_${data.cycleId}_${Date.now()}`,
-        managerId,
-        authUid,
-        collection: 'cycles',
-        docId: data.cycleId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'cycles', data.cycleId), {
+      cycleName: updatedCycle.cycleName,
+      startDate: updatedCycle.startDate,
+      endDate: updatedCycle.endDate,
+      auctionDate: updatedCycle.auctionDate,
+    });
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'cycles', updatedCycle);
     await localDb.put(managerId, 'audits', audit);
@@ -1896,40 +1561,13 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Updated fund metadata (Total Cycles: ${data.totalCycles})`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'funds', fundId), {
-        totalCycles: updatedFund.totalCycles,
-        updatedAt: updatedFund.updatedAt,
-      });
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing fund metadata update batch:', e);
-      const operations: any[] = [
-        { 
-          action: 'update', 
-          collection: 'funds', 
-          docId: fundId, 
-          data: {
-            totalCycles: updatedFund.totalCycles,
-            updatedAt: updatedFund.updatedAt,
-          } 
-        },
-        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
-      ];
-
-      await localDb.queueOfflineMutation({
-        operationId: `update_fund_${fundId}_${Date.now()}`,
-        managerId,
-        authUid,
-        collection: 'funds',
-        docId: fundId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'funds', fundId), {
+      totalCycles: updatedFund.totalCycles,
+      updatedAt: updatedFund.updatedAt,
+    });
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'funds', updatedFund);
     await localDb.put(managerId, 'audits', audit);
@@ -2014,45 +1652,16 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Fund ${fund.fundName} marked as ENDED. Final report materialized.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'funds', fundId), {
-        status: 'ended',
-        endedAt,
-        endedByManagerId: managerId,
-        finalReportSnapshot: reportSnapshot,
-        updatedAt: endedAt,
-      });
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing endFund batch mutation:', e);
-      const operations: any[] = [
-        { 
-          action: 'update', 
-          collection: 'funds', 
-          docId: fundId, 
-          data: {
-            status: 'ended',
-            endedAt,
-            endedByManagerId: managerId,
-            finalReportSnapshot: reportSnapshot,
-            updatedAt: endedAt,
-          } 
-        },
-        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
-      ];
-      await localDb.queueOfflineMutation({
-        operationId: `end_fund_${fundId}`, // Deterministic operationId (Phase 2A.5)
-        managerId,
-        authUid,
-        collection: 'funds',
-        docId: fundId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'funds', fundId), {
+      status: 'ended',
+      endedAt,
+      endedByManagerId: managerId,
+      finalReportSnapshot: reportSnapshot,
+      updatedAt: endedAt,
+    });
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'funds', updatedFund);
     await localDb.put(managerId, 'audits', audit);
@@ -2091,31 +1700,13 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Revoked ENDED state for Fund ${fund.fundName}. Restored to ACTIVE status.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'funds', fundId), {
-        status: 'active',
-        updatedAt,
-      });
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing full revokeEndFund batch:', e);
-      const operations: any[] = [
-        { action: 'update', collection: 'funds', docId: fundId, data: { status: 'active', updatedAt } },
-        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
-      ];
-      await localDb.queueOfflineMutation({
-        operationId: `revoke_end_${fundId}`, // Deterministic operationId (Phase 2A.5)
-        managerId,
-        authUid,
-        collection: 'funds',
-        docId: fundId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'funds', fundId), {
+      status: 'active',
+      updatedAt,
+    });
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'funds', updatedFund);
     await localDb.put(managerId, 'audits', audit);
@@ -2228,90 +1819,61 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       operationId: cleanIdempotencyKey,
     };
 
-    // Atomic Firestore Batch: Payment + Share + Audit + Portal Token Projection
-    try {
-      const batch = writeBatch(db);
-      batch.set(paymentRef, payment);
-      batch.update(doc(db, 'shares', share.shareId), {
-        totalCredits: nextState.totalCredits,
-        totalDebits: nextState.totalDebits,
-        arrears: nextState.arrears,
-        advance: nextState.advance,
-        updatedAt: updatedShare.updatedAt,
-      });
-      if (share.portalToken) {
-        batch.set(doc(db, 'portal_tokens', share.portalToken), {
-          token: share.portalToken,
-          managerId,
-          fundId: data.fundId,
-          shareId: share.shareId,
-          memberName: share.memberName,
-          shareNumber: share.shareNumber,
-          createdAt: share.createdAt,
-          shareSnapshot: updatedShare,
-          fundSnapshot: funds.find((f) => f.fundId === data.fundId) || null,
-          recentPayments: [payment, ...payments.filter((p) => p.shareId === share.shareId).slice(0, 19)],
-        }, { merge: true });
-      }
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (err) {
-      console.warn('Offline mode: queuing full payment transaction batch:', err);
-      const operations: any[] = [
-        { action: 'set', collection: 'payments', docId: paymentDocId, data: payment },
-        { 
-          action: 'update', 
-          collection: 'shares', 
-          docId: share.shareId, 
-          data: {
-            totalCredits: nextState.totalCredits,
-            totalDebits: nextState.totalDebits,
-            arrears: nextState.arrears,
-            advance: nextState.advance,
-            updatedAt: updatedShare.updatedAt,
-          }
-        },
-        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
-      ];
+    const fundLedger = ledgers.find((l) => l.fundId === data.fundId && l.ledgerType === 'FUND_LEDGER');
+    const arrearsDelta = share.arrears - nextState.arrears;
+    const collectedDelta = type === 'CREDIT' ? absAmount : -absAmount;
+    const updatedLedger: MaterializedLedger | null = fundLedger
+      ? {
+          ...fundLedger,
+          ledgerType: 'FUND_LEDGER',
+          totalCollected: (fundLedger.totalCollected || 0) + collectedDelta,
+          totalArrears: Math.max(0, (fundLedger.totalArrears || 0) - arrearsDelta),
+          updatedAt: new Date().toISOString(),
+        }
+      : null;
 
-      if (share.portalToken) {
-        operations.push({
-          action: 'set',
-          collection: 'portal_tokens',
-          docId: share.portalToken,
-          data: {
-            token: share.portalToken,
-            managerId,
-            fundId: data.fundId,
-            shareId: share.shareId,
-            memberName: share.memberName,
-            shareNumber: share.shareNumber,
-            createdAt: share.createdAt,
-            shareSnapshot: updatedShare,
-            fundSnapshot: funds.find((f) => f.fundId === data.fundId) || null,
-            recentPayments: [payment, ...payments.filter((p) => p.shareId === share.shareId).slice(0, 19)],
-          }
-        });
-      }
-
-      await localDb.queueOfflineMutation({
-        operationId: cleanIdempotencyKey,
-        managerId,
-        authUid,
-        collection: 'payments',
-        docId: paymentDocId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
+    // Atomic Firestore Batch: Payment + Share + Audit + Portal Token Projection + Ledger
+    const batch = writeBatch(db);
+    batch.set(paymentRef, payment);
+    batch.update(doc(db, 'shares', share.shareId), {
+      totalCredits: nextState.totalCredits,
+      totalDebits: nextState.totalDebits,
+      arrears: nextState.arrears,
+      advance: nextState.advance,
+      updatedAt: updatedShare.updatedAt,
+    });
+    if (updatedLedger) {
+      batch.set(doc(db, 'ledgers', updatedLedger.ledgerId), updatedLedger);
     }
+    if (share.portalToken) {
+      batch.set(doc(db, 'portal_tokens', share.portalToken), {
+        token: share.portalToken,
+        managerId,
+        fundId: data.fundId,
+        shareId: share.shareId,
+        memberName: share.memberName,
+        shareNumber: share.shareNumber,
+        createdAt: share.createdAt,
+        shareSnapshot: updatedShare,
+        fundSnapshot: funds.find((f) => f.fundId === data.fundId) || null,
+        recentPayments: [payment, ...payments.filter((p) => p.shareId === share.shareId).slice(0, 19)],
+      }, { merge: true });
+    }
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'payments', payment);
     await localDb.put(managerId, 'shares', updatedShare);
+    if (updatedLedger) {
+      await localDb.put(managerId, 'ledgers', updatedLedger);
+    }
     await localDb.put(managerId, 'audits', audit);
 
     setPayments((prev) => [payment, ...prev.filter((p) => p.paymentId !== payment.paymentId)]);
     setShares((prev) => prev.map((s) => (s.shareId === share.shareId ? updatedShare : s)));
+    if (updatedLedger) {
+      setLedgers((prev) => prev.map((l) => (l.ledgerId === updatedLedger.ledgerId ? updatedLedger : l)));
+    }
 
     notificationService.send('Payment Logged', `Received ₹${data.amount} from ${share.memberName} via ${data.paymentMethod}.`, 'payment');
   };
@@ -2383,22 +1945,27 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updatedAt: new Date().toISOString(),
     } : null;
 
-    // Calculate and persist updated billing & arrears across ALL shares in the fund (Phase 2B.2: Independent state)
+    // Calculate and persist updated billing & arrears across ALL shares in the fund using authoritative event stream
     const updatedAllShares = shares.map((s) => {
       if (s.fundId !== data.fundId) return s;
       const isWinner = share ? s.shareId === share.shareId : false;
       const installmentDue = finalNetInstallmentDue;
 
-      const nextState = UniversalFinancialCore.calculateNextState(
-        {
-          totalBilled: s.totalBilled,
-          totalCredits: s.totalCredits,
-          totalDebits: s.totalDebits,
-          arrears: s.arrears,
-          advance: s.advance
-        },
-        { type: 'BILLING', amount: installmentDue }
-      );
+      const otherBillings = billings
+        .filter(b => b.shareId === s.shareId && b.cycleId !== cycle.cycleId && b.fundId === data.fundId);
+      const sharePayments = payments
+        .filter(p => p.shareId === s.shareId && p.fundId === data.fundId);
+
+      const events: FinancialEvent[] = [
+        ...otherBillings.map(b => ({ type: 'BILLING' as const, amount: b.billAmount, timestamp: b.createdAt })),
+        { type: 'BILLING' as const, amount: installmentDue, timestamp: cycle.createdAt || new Date().toISOString() },
+        ...sharePayments.map(p => ({
+          type: (p.type || 'CREDIT') as 'CREDIT' | 'DEBIT',
+          amount: p.amount,
+          timestamp: p.paymentDate
+        }))
+      ];
+      const nextState = UniversalFinancialCore.rebuildState(events);
 
       return {
         ...(isWinner && updatedWinnerShare ? updatedWinnerShare : s),
@@ -2433,17 +2000,17 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       };
     }
 
-    // Materialized Chitti Ledger update
-    const chittiLedger: MaterializedLedger = {
+    // Materialized Fund Ledger update
+    const fundLedger: MaterializedLedger = {
       ledgerId: `ledger_${fund.fundId}`,
       managerId,
       fundId: fund.fundId,
-      ledgerType: 'CHITTI_LEDGER',
+      ledgerType: 'FUND_LEDGER',
       totalPool: fund.totalPool,
       totalCollected: updatedAllShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + (s.totalCredits - s.totalDebits), 0),
-      totalDisbursed: cycles.filter((c) => c.fundId === fund.fundId && c.isAuctionClosed).reduce((a, c) => a + c.winnerNetPayout, 0) + calc.winnerNetPayout,
+      totalDisbursed: cycles.filter((c) => c.fundId === fund.fundId && c.isAuctionClosed).reduce((a, c) => a + c.winnerNetPayout, 0) + finalWinnerNetPayout,
       totalArrears: updatedAllShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + s.arrears, 0),
-      totalMembers: fund.numberOfShares,
+      totalShares: fund.numberOfShares,
       updatedAt: new Date().toISOString(),
     };
 
@@ -2499,115 +2066,57 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Cycle #${data.cycleNumber} closed. Winner: ${share ? `Share #${share.shareNumber} (${share.memberName})` : 'None'}. Payout: ₹${finalWinnerNetPayout}. Persisted billing across all ${fund.numberOfShares} shares.`,
     };
 
+    // Determine highest actual existing cycle
+    const resolvedHighestCycle = nextCycle ? nextCycle.cycleNumber : data.cycleNumber;
+
     // ATOMIC WRITE BATCH: Cycle + All Shares + Next Cycle + Ledger + Audit + Billings + Payout
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'cycles', cycle.cycleId), updatedCycle as any);
-      batch.update(doc(db, 'funds', fund.fundId), {
-        currentCycle: Math.min(fundTotalCycles, data.cycleNumber + 1),
-        updatedAt: new Date().toISOString(),
-      });
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'cycles', cycle.cycleId), updatedCycle as any);
+    batch.update(doc(db, 'funds', fund.fundId), {
+      currentCycle: resolvedHighestCycle,
+      updatedAt: new Date().toISOString(),
+    });
 
-      // Crucial: Atomically update every participating share and portal token projection in Firestore
-      for (const s of updatedAllShares.filter((sh) => sh.fundId === data.fundId)) {
-        batch.update(doc(db, 'shares', s.shareId), {
-          totalBilled: s.totalBilled,
-          totalCredits: s.totalCredits,
-          totalDebits: s.totalDebits,
-          arrears: s.arrears,
-          advance: s.advance,
-          hasClaimedPrize: s.hasClaimedPrize,
-          wonCycleNumber: s.wonCycleNumber,
-          status: s.status,
+    // Crucial: Atomically update every participating share and portal token projection in Firestore
+    for (const s of updatedAllShares.filter((sh) => sh.fundId === data.fundId)) {
+      batch.update(doc(db, 'shares', s.shareId), {
+        totalBilled: s.totalBilled,
+        totalCredits: s.totalCredits,
+        totalDebits: s.totalDebits,
+        arrears: s.arrears,
+        advance: s.advance,
+        hasClaimedPrize: s.hasClaimedPrize,
+        wonCycleNumber: s.wonCycleNumber,
+        status: s.status,
+        updatedAt: s.updatedAt,
+      });
+      if (s.portalToken) {
+        batch.set(doc(db, 'portal_tokens', s.portalToken), {
+          shareSnapshot: s,
           updatedAt: s.updatedAt,
-        });
-        if (s.portalToken) {
-          batch.set(doc(db, 'portal_tokens', s.portalToken), {
-            shareSnapshot: s,
-            updatedAt: s.updatedAt,
-          }, { merge: true });
-        }
+        }, { merge: true });
       }
-
-      for (const b of billingDocs) {
-        batch.set(doc(db, 'billings', b.billingId), b);
-      }
-      if (payoutDoc) {
-        batch.set(doc(db, 'payouts', payoutDoc.payoutId), payoutDoc);
-      }
-
-      if (nextCycle) {
-        batch.set(doc(db, 'cycles', nextCycle.cycleId), nextCycle);
-      }
-      batch.set(doc(db, 'ledgers', chittiLedger.ledgerId), chittiLedger);
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-
-      await batch.commit();
-    } catch (err) {
-      console.warn('Offline mode: queuing full cycle finalization batch:', err);
-      const operations: any[] = [
-        { action: 'update', collection: 'cycles', docId: cycle.cycleId, data: updatedCycle },
-        { 
-          action: 'update', 
-          collection: 'funds', 
-          docId: fund.fundId, 
-          data: {
-            currentCycle: Math.min(fundTotalCycles, data.cycleNumber + 1),
-            updatedAt: new Date().toISOString(),
-          }
-        }
-      ];
-
-      for (const s of updatedAllShares.filter((sh) => sh.fundId === data.fundId)) {
-        operations.push({
-          action: 'update',
-          collection: 'shares',
-          docId: s.shareId,
-          data: {
-            totalBilled: s.totalBilled,
-            totalCredits: s.totalCredits,
-            totalDebits: s.totalDebits,
-            arrears: s.arrears,
-            advance: s.advance,
-            hasClaimedPrize: s.hasClaimedPrize,
-            wonCycleNumber: s.wonCycleNumber,
-            status: s.status,
-            updatedAt: s.updatedAt,
-          }
-        });
-      }
-
-      for (const b of billingDocs) {
-        operations.push({ action: 'set', collection: 'billings', docId: b.billingId, data: b });
-      }
-
-      if (payoutDoc) {
-        operations.push({ action: 'set', collection: 'payouts', docId: payoutDoc.payoutId, data: payoutDoc });
-      }
-
-      if (nextCycle) {
-        operations.push({ action: 'set', collection: 'cycles', docId: nextCycle.cycleId, data: nextCycle });
-      }
-
-      operations.push({ action: 'set', collection: 'ledgers', docId: chittiLedger.ledgerId, data: chittiLedger });
-      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
-
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'cycles',
-        docId: cycle.cycleId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
     }
+
+    for (const b of billingDocs) {
+      batch.set(doc(db, 'billings', b.billingId), b);
+    }
+    if (payoutDoc) {
+      batch.set(doc(db, 'payouts', payoutDoc.payoutId), payoutDoc);
+    }
+
+    if (nextCycle) {
+      batch.set(doc(db, 'cycles', nextCycle.cycleId), nextCycle);
+    }
+    batch.set(doc(db, 'ledgers', fundLedger.ledgerId), fundLedger);
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+
+    await batch.commit();
 
     await localDb.put(managerId, 'cycles', updatedCycle);
     await localDb.putBatch(managerId, 'shares', updatedAllShares);
     if (nextCycle) await localDb.put(managerId, 'cycles', nextCycle);
-    await localDb.put(managerId, 'ledgers', chittiLedger);
+    await localDb.put(managerId, 'ledgers', fundLedger);
     await localDb.put(managerId, 'audits', audit);
     for (const b of billingDocs) {
       await localDb.put(managerId, 'billings', b);
@@ -2628,7 +2137,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setPayouts((prev) => [...prev.filter((p) => p.payoutId !== payoutDoc!.payoutId), payoutDoc!]);
     }
     setShares(prev => prev.map(s => updatedAllShares.find(us => us.shareId === s.shareId) || s));
-    setLedgers((prev) => [...prev.filter((l) => l.ledgerId !== chittiLedger.ledgerId), chittiLedger]);
+    setLedgers((prev) => [...prev.filter((l) => l.ledgerId !== fundLedger.ledgerId), fundLedger]);
 
     notificationService.send(
       `Cycle Billing Finalized: Cycle #${data.cycleNumber}`,
@@ -2685,102 +2194,50 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       createdAt: serverTimestamp(),
     };
 
-    // Materialized Chitti Ledger recalculation
-    const chittiLedger: MaterializedLedger = {
+    // Materialized Fund Ledger recalculation
+    const fundLedger: MaterializedLedger = {
       ledgerId: `ledger_${fund.fundId}`,
       managerId,
       fundId: fund.fundId,
-      ledgerType: 'CHITTI_LEDGER',
+      ledgerType: 'FUND_LEDGER',
       totalPool: fund.totalPool,
       totalCollected: plan.updatedShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + (s.totalCredits - s.totalDebits), 0),
       totalDisbursed: plan.updatedCycles.filter((c) => c.fundId === fund.fundId && c.isAuctionClosed).reduce((a, c) => a + c.winnerNetPayout, 0),
       totalArrears: plan.updatedShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + s.arrears, 0),
-      totalMembers: fund.numberOfShares,
+      totalShares: fund.numberOfShares,
       updatedAt: new Date().toISOString(),
     };
 
     // ATOMIC WRITE BATCH
-    try {
-      const batch = writeBatch(db);
-      for (const c of plan.updatedCycles.filter((cy) => cy.fundId === fund.fundId)) {
-        batch.update(doc(db, 'cycles', c.cycleId), c as any);
-      }
-      for (const b of plan.updatedBillings.filter((bi) => bi.fundId === fund.fundId)) {
-        batch.update(doc(db, 'billings', b.billingId), {
-          billAmount: b.billAmount,
-          updatedAt: b.updatedAt,
-        });
-      }
-      for (const s of plan.updatedShares.filter((sh) => sh.fundId === fund.fundId)) {
-        batch.update(doc(db, 'shares', s.shareId), {
-          totalBilled: s.totalBilled,
-          arrears: s.arrears,
-          advance: s.advance,
-          hasClaimedPrize: s.hasClaimedPrize,
-          wonCycleNumber: s.wonCycleNumber,
-          status: s.status,
-          updatedAt: s.updatedAt,
-        });
-      }
-      batch.set(doc(db, 'ledgers', chittiLedger.ledgerId), chittiLedger);
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (err) {
-      console.warn('Offline mode: queuing full historical reconciliation batch:', err);
-      const operations: any[] = [];
-      
-      for (const c of plan.updatedCycles.filter((cy) => cy.fundId === fund.fundId)) {
-        operations.push({ action: 'update', collection: 'cycles', docId: c.cycleId, data: c });
-      }
-      
-      for (const b of plan.updatedBillings.filter((bi) => bi.fundId === fund.fundId)) {
-        operations.push({ 
-          action: 'update', 
-          collection: 'billings', 
-          docId: b.billingId, 
-          data: {
-            billAmount: b.billAmount,
-            updatedAt: b.updatedAt,
-          }
-        });
-      }
-      
-      for (const s of plan.updatedShares.filter((sh) => sh.fundId === fund.fundId)) {
-        operations.push({
-          action: 'update',
-          collection: 'shares',
-          docId: s.shareId,
-          data: {
-            totalBilled: s.totalBilled,
-            arrears: s.arrears,
-            advance: s.advance,
-            hasClaimedPrize: s.hasClaimedPrize,
-            wonCycleNumber: s.wonCycleNumber,
-            status: s.status,
-            updatedAt: s.updatedAt,
-          }
-        });
-      }
-      
-      operations.push({ action: 'set', collection: 'ledgers', docId: chittiLedger.ledgerId, data: chittiLedger });
-      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
-
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'cycles',
-        docId: cycle.cycleId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
+    const batch = writeBatch(db);
+    for (const c of plan.updatedCycles.filter((cy) => cy.fundId === fund.fundId)) {
+      batch.update(doc(db, 'cycles', c.cycleId), c as any);
     }
+    for (const b of plan.updatedBillings.filter((bi) => bi.fundId === fund.fundId)) {
+      batch.update(doc(db, 'billings', b.billingId), {
+        billAmount: b.billAmount,
+        updatedAt: b.updatedAt,
+      });
+    }
+    for (const s of plan.updatedShares.filter((sh) => sh.fundId === fund.fundId)) {
+      batch.update(doc(db, 'shares', s.shareId), {
+        totalBilled: s.totalBilled,
+        arrears: s.arrears,
+        advance: s.advance,
+        hasClaimedPrize: s.hasClaimedPrize,
+        wonCycleNumber: s.wonCycleNumber,
+        status: s.status,
+        updatedAt: s.updatedAt,
+      });
+    }
+    batch.set(doc(db, 'ledgers', fundLedger.ledgerId), fundLedger);
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.putBatch(managerId, 'cycles', plan.updatedCycles);
     await localDb.putBatch(managerId, 'billings', plan.updatedBillings);
     await localDb.putBatch(managerId, 'shares', plan.updatedShares);
-    await localDb.put(managerId, 'ledgers', chittiLedger);
+    await localDb.put(managerId, 'ledgers', fundLedger);
     await localDb.put(managerId, 'audits', audit);
 
     setCycles(plan.updatedCycles);
@@ -2793,7 +2250,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return newBillings;
     });
     setShares(plan.updatedShares);
-    setLedgers((prev) => [...prev.filter((l) => l.ledgerId !== chittiLedger.ledgerId), chittiLedger]);
+    setLedgers((prev) => [...prev.filter((l) => l.ledgerId !== fundLedger.ledgerId), fundLedger]);
 
     notificationService.send('Historical Reconciliation Applied', `Reconciled Cycle #${cycle.cycleNumber}. New Winner: ${plan.newWinnerShare.memberName}.`, 'sync');
   };
@@ -2988,20 +2445,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updatedAt: new Date().toISOString(),
     };
 
-    try {
-      await setDoc(doc(db, 'contacts', contactId), newContact);
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: `create_contact_${contactId}`, // Deterministic operationId (Phase 2A.5)
-        managerId,
-        authUid,
-        collection: 'contacts',
-        docId: contactId,
-        type: 'set',
-        payload: newContact,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await setDoc(doc(db, 'contacts', contactId), newContact);
     await localDb.put(managerId, 'contacts', newContact);
     setContacts((prev) => {
       const filtered = prev.filter(c => c.contactId !== contactId);
@@ -3052,7 +2496,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // Ensure displayId is removed for contacts
     delete (updatedContact as any).displayId;
 
-    try {
       if (targetContactId !== contactId) {
         // Phone number changed: write new doc, delete old doc
         await setDoc(doc(db, 'contacts', targetContactId), updatedContact);
@@ -3080,18 +2523,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       } else {
         await setDoc(doc(db, 'contacts', contactId), updatedContact, { merge: true });
       }
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: `update_contact_${targetContactId}`, // Deterministic operationId (Phase 2A.5)
-        managerId,
-        authUid,
-        collection: 'contacts',
-        docId: targetContactId,
-        type: 'set',
-        payload: updatedContact,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
 
     await localDb.put(managerId, 'contacts', updatedContact);
     setContacts((prev) => {
@@ -3121,20 +2552,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
     }
 
-    try {
-      await deleteDoc(doc(db, 'contacts', contactId));
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'contacts',
-        docId: contactId,
-        type: 'delete',
-        payload: null,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await deleteDoc(doc(db, 'contacts', contactId));
 
     await localDb.delete(managerId, 'contacts', contactId);
     setContacts((prev) => prev.filter((c) => c.contactId !== contactId));
@@ -3178,20 +2596,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    try {
-      await setDoc(doc(db, 'groups', groupId), newGroup);
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'groups',
-        docId: groupId,
-        type: 'set',
-        payload: newGroup,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await setDoc(doc(db, 'groups', groupId), newGroup);
     await localDb.put(managerId, 'groups', newGroup);
     setGroups((prev) => [newGroup, ...prev.filter((g) => g.groupId !== newGroup.groupId)]);
     return groupId;
@@ -3210,24 +2615,11 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updatedAt: new Date().toISOString(),
     };
 
-    try {
-      await updateDoc(doc(db, 'groups', groupId), {
-        name: updatedGroup.name,
-        description: updatedGroup.description,
-        updatedAt: updatedGroup.updatedAt,
-      });
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'groups',
-        docId: groupId,
-        type: 'set',
-        payload: updatedGroup,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await updateDoc(doc(db, 'groups', groupId), {
+      name: updatedGroup.name,
+      description: updatedGroup.description,
+      updatedAt: updatedGroup.updatedAt,
+    });
     await localDb.put(managerId, 'groups', updatedGroup);
     setGroups((prev) => prev.map((g) => (g.groupId === groupId ? updatedGroup : g)));
   };
@@ -3238,20 +2630,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const existing = groups.find((g) => g.groupId === groupId && g.managerId === managerId);
     if (!existing) throw new Error('Group not found');
 
-    try {
-      await deleteDoc(doc(db, 'groups', groupId));
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'groups',
-        docId: groupId,
-        type: 'delete',
-        payload: null,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await deleteDoc(doc(db, 'groups', groupId));
     await localDb.delete(managerId, 'groups', groupId);
     setGroups((prev) => prev.filter((g) => g.groupId !== groupId));
   };
@@ -3268,23 +2647,10 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updatedAt: new Date().toISOString(),
     };
 
-    try {
-      await updateDoc(doc(db, 'groups', groupId), {
-        contactIds,
-        updatedAt: updatedGroup.updatedAt,
-      });
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'groups',
-        docId: groupId,
-        type: 'set',
-        payload: updatedGroup,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await updateDoc(doc(db, 'groups', groupId), {
+      contactIds,
+      updatedAt: updatedGroup.updatedAt,
+    });
     await localDb.put(managerId, 'groups', updatedGroup);
     setGroups((prev) => prev.map((g) => (g.groupId === groupId ? updatedGroup : g)));
   };
@@ -3330,20 +2696,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       status: 'sent',
       createdAt: new Date().toISOString(),
     };
-    try {
-      await setDoc(doc(db, 'campaigns', campaignId), newCampaign);
-    } catch (e) {
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'campaigns',
-        docId: campaignId,
-        type: 'set',
-        payload: newCampaign,
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await setDoc(doc(db, 'campaigns', campaignId), newCampaign);
     await localDb.put(managerId, 'campaigns', newCampaign);
     setCampaigns((prev) => [newCampaign, ...prev.filter((c) => c.campaignId !== newCampaign.campaignId)]);
 
@@ -3407,64 +2760,46 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
 
     // 1. Update in Firestore with audit
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'shares', data.shareId), {
-        memberName: trimmedName,
-        memberPhone: trimmedPhone,
-        contactId: data.contactId || targetShare.contactId || null,
-        updatedAt: now,
-      });
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'shares', data.shareId), {
+      memberName: trimmedName,
+      memberPhone: trimmedPhone,
+      contactId: data.contactId || targetShare.contactId || null,
+      updatedAt: now,
+    });
 
-      // Update portal token document snapshot if present
-      if (targetShare.portalToken) {
-        batch.set(
-          doc(db, 'portal_tokens', targetShare.portalToken),
-          {
+    // Update portal token document snapshot if present
+    if (targetShare.portalToken) {
+      batch.set(
+        doc(db, 'portal_tokens', targetShare.portalToken),
+        {
+          memberName: trimmedName,
+          shareSnapshot: {
+            ...targetShare,
             memberName: trimmedName,
-            shareSnapshot: {
-              ...targetShare,
-              memberName: trimmedName,
-              memberPhone: trimmedPhone,
-              updatedAt: now,
-            },
+            memberPhone: trimmedPhone,
             updatedAt: now,
           },
-          { merge: true }
-        );
-      }
-
-      // Authoritative audit trail
-      const auditId = `aud_shrupd_${Date.now()}`;
-      batch.set(doc(db, 'audits', auditId), {
-        auditId,
-        managerId,
-        actorUid,
-        action: 'UPDATE_MEMBER_INFO',
-        entityType: 'SHARE',
-        entityId: data.shareId,
-        details: `Updated member info for share ${targetShare.shareNumber} (${data.shareId}) to "${trimmedName}" (${trimmedPhone})`,
-        createdAt: serverTimestamp(),
-      });
-
-      await batch.commit();
-    } catch (e) {
-      console.warn('Network update failed, queueing offline mutation:', e);
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid: authUid || managerId || '',
-        collection: 'shares',
-        docId: data.shareId,
-        type: 'update',
-        payload: {
-          memberName: trimmedName,
-          memberPhone: trimmedPhone,
           updatedAt: now,
         },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
+        { merge: true }
+      );
     }
+
+    // Authoritative audit trail
+    const auditId = `aud_shrupd_${Date.now()}`;
+    batch.set(doc(db, 'audits', auditId), {
+      auditId,
+      managerId,
+      actorUid,
+      action: 'UPDATE_MEMBER_INFO',
+      entityType: 'SHARE',
+      entityId: data.shareId,
+      details: `Updated member info for share ${targetShare.shareNumber} (${data.shareId}) to "${trimmedName}" (${trimmedPhone})`,
+      createdAt: serverTimestamp(),
+    });
+
+    await batch.commit();
 
     // 2. Update local state
     setShares((prev) =>
@@ -3539,13 +2874,14 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
 
     // Recalculate Materialized Ledger
-    const chittiLedger = ledgers.find((l) => l.fundId === fundId && l.ledgerType === 'CHITTI_LEDGER');
+    const fundLedger = ledgers.find((l) => l.fundId === fundId && l.ledgerType === 'FUND_LEDGER');
     let updatedLedger: MaterializedLedger | null = null;
-    if (chittiLedger) {
+    if (fundLedger) {
       const payoutSum = cyclePayouts.reduce((sum, p) => sum + p.amount, 0);
       updatedLedger = {
-        ...chittiLedger,
-        totalDisbursed: Math.max(0, chittiLedger.totalDisbursed - payoutSum),
+        ...fundLedger,
+        ledgerType: 'FUND_LEDGER',
+        totalDisbursed: Math.max(0, fundLedger.totalDisbursed - payoutSum),
         totalArrears: updatedShares.reduce((sum, s) => sum + s.arrears, 0),
         totalCollected: updatedShares.reduce((sum, s) => sum + (s.totalCredits - s.totalDebits), 0),
         updatedAt: now,
@@ -3565,152 +2901,63 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Deleted Cycle #${targetCycle.cycleNumber} ("${targetCycle.cycleName}"). Reconciled financial state for ${fundShares.length} shares. Removed ${cycleBillings.length} billings and cancelled ${cyclePayouts.length} payouts.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      
-      // 1. Delete Cycle
-      batch.delete(doc(db, 'cycles', targetCycle.cycleId));
-      
-      // 2. Delete Cycle Billings
-      for (const b of cycleBillings) {
-        batch.delete(doc(db, 'billings', b.billingId));
-      }
-      
-      // 3. Cancel Cycle Payouts
-      for (const p of cyclePayouts) {
-        batch.update(doc(db, 'payouts', p.payoutId), {
-          status: 'cancelled',
+    // 1. Delete Cycle
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'cycles', targetCycle.cycleId));
+    
+    // 2. Delete Cycle Billings
+    for (const b of cycleBillings) {
+      batch.delete(doc(db, 'billings', b.billingId));
+    }
+    
+    // 3. Cancel Cycle Payouts
+    for (const p of cyclePayouts) {
+      batch.update(doc(db, 'payouts', p.payoutId), {
+        status: 'cancelled',
+        updatedAt: now,
+        updatedBy: authUid,
+      });
+    }
+    
+    // 4. Update Participating Shares
+    for (const us of updatedShares) {
+      batch.update(doc(db, 'shares', us.shareId), {
+        totalBilled: us.totalBilled,
+        arrears: us.arrears,
+        advance: us.advance,
+        hasClaimedPrize: us.hasClaimedPrize,
+        wonCycleNumber: us.wonCycleNumber,
+        status: us.status,
+        updatedAt: us.updatedAt,
+      });
+      if (us.portalToken) {
+        batch.set(doc(db, 'portal_tokens', us.portalToken), {
+          shareSnapshot: us,
           updatedAt: now,
-          updatedBy: authUid,
-        });
+        }, { merge: true });
       }
-      
-      // 4. Update Participating Shares
-      for (const us of updatedShares) {
-        batch.update(doc(db, 'shares', us.shareId), {
-          totalBilled: us.totalBilled,
-          arrears: us.arrears,
-          advance: us.advance,
-          hasClaimedPrize: us.hasClaimedPrize,
-          wonCycleNumber: us.wonCycleNumber,
-          status: us.status,
-          updatedAt: us.updatedAt,
-        });
-        if (us.portalToken) {
-          batch.set(doc(db, 'portal_tokens', us.portalToken), {
-            shareSnapshot: us,
-            updatedAt: now,
-          }, { merge: true });
-        }
-      }
-      
-      // 5. Update Fund currentCycle
-      batch.update(doc(db, 'funds', fundId), {
-        currentCycle: updatedFund.currentCycle,
+    }
+    
+    // 5. Update Fund currentCycle
+    batch.update(doc(db, 'funds', fundId), {
+      currentCycle: updatedFund.currentCycle,
+      updatedAt: now,
+    });
+    
+    // 6. Update Ledger
+    if (updatedLedger) {
+      batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
+        totalDisbursed: updatedLedger.totalDisbursed,
+        totalArrears: updatedLedger.totalArrears,
+        totalCollected: updatedLedger.totalCollected,
         updatedAt: now,
       });
-      
-      // 6. Update Ledger
-      if (updatedLedger) {
-        batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
-          totalDisbursed: updatedLedger.totalDisbursed,
-          totalArrears: updatedLedger.totalArrears,
-          totalCollected: updatedLedger.totalCollected,
-          updatedAt: now,
-        });
-      }
-      
-      // 7. Audit
-      batch.set(doc(db, 'audits', auditId), audit);
-
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing full cycle deletion batch:', e);
-      const operations: any[] = [
-        { action: 'delete', collection: 'cycles', docId: targetCycle.cycleId },
-        { 
-          action: 'update', 
-          collection: 'funds', 
-          docId: fundId, 
-          data: {
-            currentCycle: updatedFund.currentCycle,
-            updatedAt: now,
-          }
-        }
-      ];
-
-      for (const b of cycleBillings) {
-        operations.push({ action: 'delete', collection: 'billings', docId: b.billingId });
-      }
-
-      for (const p of cyclePayouts) {
-        operations.push({
-          action: 'update',
-          collection: 'payouts',
-          docId: p.payoutId,
-          data: {
-            status: 'cancelled',
-            updatedAt: now,
-            updatedBy: authUid,
-          }
-        });
-      }
-
-      for (const us of updatedShares) {
-        operations.push({
-          action: 'update',
-          collection: 'shares',
-          docId: us.shareId,
-          data: {
-            totalBilled: us.totalBilled,
-            arrears: us.arrears,
-            advance: us.advance,
-            hasClaimedPrize: us.hasClaimedPrize,
-            wonCycleNumber: us.wonCycleNumber,
-            status: us.status,
-            updatedAt: us.updatedAt,
-          }
-        });
-        if (us.portalToken) {
-          operations.push({
-            action: 'update',
-            collection: 'portal_tokens',
-            docId: us.portalToken,
-            data: {
-              shareSnapshot: us,
-              updatedAt: now,
-            }
-          });
-        }
-      }
-
-      if (updatedLedger) {
-        operations.push({
-          action: 'update',
-          collection: 'ledgers',
-          docId: updatedLedger.ledgerId,
-          data: {
-            totalDisbursed: updatedLedger.totalDisbursed,
-            totalArrears: updatedLedger.totalArrears,
-            totalCollected: updatedLedger.totalCollected,
-            updatedAt: now,
-          }
-        });
-      }
-
-      operations.push({ action: 'set', collection: 'audits', docId: auditId, data: audit });
-
-      await localDb.queueOfflineMutation({
-        operationId: `delete_cycle_${targetCycle.cycleId}`, // Deterministic operationId (Phase 2A.5)
-        managerId,
-        authUid,
-        collection: 'cycles',
-        docId: targetCycle.cycleId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
     }
+    
+    // 7. Audit
+    batch.set(doc(db, 'audits', auditId), audit);
+
+    await batch.commit();
 
     // Update local state
     setCycles((prev) => prev.filter((c) => c.cycleId !== targetCycle.cycleId));
@@ -3749,112 +2996,47 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const targetPayouts = payouts.filter((p) => p.fundId === fundId);
 
     // Commit atomic batch deletion across all fund entities
-    try {
-      const batch = writeBatch(db);
-      batch.delete(doc(db, 'funds', fundId));
-      targetShares.forEach((s) => batch.delete(doc(db, 'shares', s.shareId)));
-      targetCycles.forEach((c) => batch.delete(doc(db, 'cycles', c.cycleId)));
-      targetLedgers.forEach((l) => batch.delete(doc(db, 'ledgers', l.ledgerId)));
-      targetBillings.forEach((b) => batch.delete(doc(db, 'billings', b.billingId)));
-      targetPayouts.forEach((p) => batch.delete(doc(db, 'payouts', p.payoutId)));
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'funds', fundId));
+    targetShares.forEach((s) => batch.delete(doc(db, 'shares', s.shareId)));
+    targetCycles.forEach((c) => batch.delete(doc(db, 'cycles', c.cycleId)));
+    targetLedgers.forEach((l) => batch.delete(doc(db, 'ledgers', l.ledgerId)));
+    targetBillings.forEach((b) => batch.delete(doc(db, 'billings', b.billingId)));
+    targetPayouts.forEach((p) => batch.delete(doc(db, 'payouts', p.payoutId)));
 
-      // Permanently retire display IDs in the global registry (never recycled)
-      if (targetFund.displayId && HUMAN_ID_REGEX.test(targetFund.displayId)) {
-        batch.update(doc(db, 'display_id_registry', targetFund.displayId), {
+    // Permanently retire display IDs in the global registry (never recycled)
+    if (targetFund.displayId && HUMAN_ID_REGEX.test(targetFund.displayId)) {
+      batch.update(doc(db, 'display_id_registry', targetFund.displayId), {
+        status: 'RETIRED',
+        retiredAt: serverTimestamp(),
+        retiredReason: `Deleted with Fund "${targetFund.fundName}" (${fundId})`,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    targetShares.forEach((s) => {
+      if (s.displayId && HUMAN_ID_REGEX.test(s.displayId)) {
+        batch.update(doc(db, 'display_id_registry', s.displayId), {
           status: 'RETIRED',
           retiredAt: serverTimestamp(),
           retiredReason: `Deleted with Fund "${targetFund.fundName}" (${fundId})`,
           updatedAt: serverTimestamp(),
         });
       }
-      targetShares.forEach((s) => {
-        if (s.displayId && HUMAN_ID_REGEX.test(s.displayId)) {
-          batch.update(doc(db, 'display_id_registry', s.displayId), {
-            status: 'RETIRED',
-            retiredAt: serverTimestamp(),
-            retiredReason: `Deleted with Fund "${targetFund.fundName}" (${fundId})`,
-            updatedAt: serverTimestamp(),
-          });
-        }
-      });
+    });
 
-      const auditId = `aud_funddel_${Date.now()}`;
-      batch.set(doc(db, 'audits', auditId), {
-        auditId,
-        managerId,
-        actorUid,
-        action: 'DELETE_CHITTI_SCHEME',
-        entityType: 'FUND',
-        entityId: fundId,
-        details: `Deleted Fund scheme "${targetFund.fundName}" (${fundId}) with ${targetShares.length} shares, ${targetCycles.length} cycles, ${targetBillings.length} billings, and ${targetPayouts.length} payouts`,
-        createdAt: serverTimestamp(),
-      });
+    const auditId = `aud_funddel_${Date.now()}`;
+    batch.set(doc(db, 'audits', auditId), {
+      auditId,
+      managerId,
+      actorUid,
+      action: 'DELETE_CHITTI_SCHEME',
+      entityType: 'FUND',
+      entityId: fundId,
+      details: `Deleted Fund scheme "${targetFund.fundName}" (${fundId}) with ${targetShares.length} shares, ${targetCycles.length} cycles, ${targetBillings.length} billings, and ${targetPayouts.length} payouts`,
+      createdAt: serverTimestamp(),
+    });
 
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing full fund deletion batch:', e);
-      const operations: any[] = [
-        { action: 'delete', collection: 'funds', docId: fundId }
-      ];
-      targetShares.forEach((s) => operations.push({ action: 'delete', collection: 'shares', docId: s.shareId }));
-      targetCycles.forEach((c) => operations.push({ action: 'delete', collection: 'cycles', docId: c.cycleId }));
-      targetLedgers.forEach((l) => operations.push({ action: 'delete', collection: 'ledgers', docId: l.ledgerId }));
-      targetBillings.forEach((b) => operations.push({ action: 'delete', collection: 'billings', docId: b.billingId }));
-      targetPayouts.forEach((p) => operations.push({ action: 'delete', collection: 'payouts', docId: p.payoutId }));
-
-      if (targetFund.displayId && HUMAN_ID_REGEX.test(targetFund.displayId)) {
-        operations.push({
-          action: 'update',
-          collection: 'display_id_registry',
-          docId: targetFund.displayId,
-          data: {
-            status: 'RETIRED',
-            retiredAt: new Date().toISOString(),
-            retiredReason: `Deleted with Fund "${targetFund.fundName}" (${fundId})`,
-            updatedAt: new Date().toISOString(),
-          }
-        });
-      }
-      targetShares.forEach((s) => {
-        if (s.displayId && HUMAN_ID_REGEX.test(s.displayId)) {
-          operations.push({
-            action: 'update',
-            collection: 'display_id_registry',
-            docId: s.displayId,
-            data: {
-              status: 'RETIRED',
-              retiredAt: new Date().toISOString(),
-              retiredReason: `Deleted with Fund "${targetFund.fundName}" (${fundId})`,
-              updatedAt: new Date().toISOString(),
-            }
-          });
-        }
-      });
-
-      const auditId = `aud_funddel_${Date.now()}`;
-      const auditData = {
-        auditId,
-        managerId,
-        actorUid,
-        action: 'DELETE_CHITTI_SCHEME',
-        entityType: 'FUND',
-        entityId: fundId,
-        details: `Deleted Fund scheme "${targetFund.fundName}" (${fundId}) with ${targetShares.length} shares, ${targetCycles.length} cycles, ${targetBillings.length} billings, and ${targetPayouts.length} payouts`,
-        createdAt: new Date().toISOString(),
-      };
-      operations.push({ action: 'set', collection: 'audits', docId: auditId, data: auditData });
-
-      await localDb.queueOfflineMutation({
-        operationId: `delete_fund_${fundId}`,
-        managerId,
-        authUid,
-        collection: 'funds',
-        docId: fundId,
-        type: 'batch',
-        payload: { operations },
-      });
-      setPendingOfflineCount((prev) => prev + 1);
-    }
+    await batch.commit();
 
     // Update local state
     setFunds((prev) => prev.filter((f) => f.fundId !== fundId));
@@ -3939,10 +3121,11 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const totalDisbursed = fundPayouts.reduce((sum, p) => sum + p.amount, 0);
     const totalArrears = updatedShares.reduce((a, s) => a + s.arrears, 0);
 
-    const chittiLedger = ledgers.find((l) => l.fundId === fundId && l.ledgerType === 'CHITTI_LEDGER');
-    const updatedLedger: MaterializedLedger = chittiLedger
+    const fundLedger = ledgers.find((l) => l.fundId === fundId && l.ledgerType === 'FUND_LEDGER');
+    const updatedLedger: MaterializedLedger = fundLedger
       ? {
-          ...chittiLedger,
+          ...fundLedger,
+          ledgerType: 'FUND_LEDGER',
           totalCollected,
           totalDisbursed,
           totalArrears,
@@ -3952,12 +3135,12 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ledgerId: `ledger_${fundId}`,
           managerId,
           fundId,
-          ledgerType: 'CHITTI_LEDGER',
+          ledgerType: 'FUND_LEDGER',
           totalPool: fund.totalPool,
           totalCollected,
           totalDisbursed,
           totalArrears,
-          totalMembers: fund.numberOfShares,
+          totalShares: fund.numberOfShares,
           updatedAt: new Date().toISOString(),
         };
 
@@ -3973,27 +3156,23 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Systemic rebuild of materialized state for fund ${fund.fundName} based on /billings, /payments, and /payouts.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      for (const s of updatedShares) {
-        batch.update(doc(db, 'shares', s.shareId), {
-          totalBilled: s.totalBilled,
-          totalCredits: s.totalCredits,
-          totalDebits: s.totalDebits,
-          arrears: s.arrears,
-          advance: s.advance,
-          hasClaimedPrize: s.hasClaimedPrize,
-          wonCycleNumber: s.wonCycleNumber,
-          status: s.status,
-          updatedAt: s.updatedAt,
-        });
-      }
-      batch.set(doc(db, 'ledgers', updatedLedger.ledgerId), updatedLedger);
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Failed to commit rebuild batch to network:', e);
+    const batch = writeBatch(db);
+    for (const s of updatedShares) {
+      batch.update(doc(db, 'shares', s.shareId), {
+        totalBilled: s.totalBilled,
+        totalCredits: s.totalCredits,
+        totalDebits: s.totalDebits,
+        arrears: s.arrears,
+        advance: s.advance,
+        hasClaimedPrize: s.hasClaimedPrize,
+        wonCycleNumber: s.wonCycleNumber,
+        status: s.status,
+        updatedAt: s.updatedAt,
+      });
     }
+    batch.set(doc(db, 'ledgers', updatedLedger.ledgerId), updatedLedger);
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     // Update local state and localDb
     setShares((prev) =>
@@ -4046,20 +3225,16 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Updated fund identity: Name="${name.trim()}", Frequency="${frequency}", Start Date="${updatedFund.startDate}", Total Cycles="${plannedCyclesVal || 'Unchanged'}".`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'funds', fundId), {
-        fundName: updatedFund.fundName,
-        cycleFrequency: updatedFund.cycleFrequency,
-        totalCycles: updatedFund.totalCycles,
-        startDate: updatedFund.startDate,
-        updatedAt: updatedFund.updatedAt,
-      });
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing fund update:', e);
-    }
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'funds', fundId), {
+      fundName: updatedFund.fundName,
+      cycleFrequency: updatedFund.cycleFrequency,
+      totalCycles: updatedFund.totalCycles,
+      startDate: updatedFund.startDate,
+      updatedAt: updatedFund.updatedAt,
+    });
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     await localDb.put(managerId, 'funds', updatedFund);
     await localDb.put(managerId, 'audits', audit);
@@ -4098,71 +3273,37 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: `Deleted Share #${share.shareNumber} (${share.memberName}) from scheme ${fund.fundName}.`,
     };
 
-    try {
-      const batch = writeBatch(db);
-      batch.delete(doc(db, 'shares', shareId));
-      
-      // Permanently retire display ID in the global registry (never recycled)
-      if (share.displayId && HUMAN_ID_REGEX.test(share.displayId)) {
-        batch.update(doc(db, 'display_id_registry', share.displayId), {
-          status: 'RETIRED',
-          retiredAt: serverTimestamp(),
-          retiredReason: `Deleted Share #${share.shareNumber} from scheme ${fund.fundName}`,
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      if (share.portalToken) {
-        batch.delete(doc(db, 'portal_tokens', share.portalToken));
-      } else {
-        // Fallback for orphans if online
-        try {
-          const tokensRef = collection(db, 'portal_tokens');
-          const q = query(tokensRef, where('shareId', '==', shareId));
-          const qSnap = await getDocs(q);
-          qSnap.forEach((d) => {
-            batch.delete(doc(db, 'portal_tokens', d.id));
-          });
-        } catch (innerE) {
-          console.warn('Could not query portal tokens for deletion (might be offline):', innerE);
-        }
-      }
-
-      batch.set(doc(db, 'audits', audit.auditId), audit);
-      await batch.commit();
-    } catch (e) {
-      console.warn('Offline mode: queuing full share deletion batch:', e);
-      const operations: any[] = [
-        { action: 'delete', collection: 'shares', docId: shareId }
-      ];
-      if (share.displayId && HUMAN_ID_REGEX.test(share.displayId)) {
-        operations.push({
-          action: 'update',
-          collection: 'display_id_registry',
-          docId: share.displayId,
-          data: {
-            status: 'RETIRED',
-            retiredReason: `Deleted Share #${share.shareNumber} from scheme ${fund.fundName}`,
-            updatedAt: now, // Offline use ISO instead of serverTimestamp
-          }
-        });
-      }
-      if (share.portalToken) {
-        operations.push({ action: 'delete', collection: 'portal_tokens', docId: share.portalToken });
-      }
-      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
-
-      await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
-        managerId,
-        authUid,
-        collection: 'shares',
-        docId: shareId,
-        type: 'batch',
-        payload: { operations },
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'shares', shareId));
+    
+    // Permanently retire display ID in the global registry (never recycled)
+    if (share.displayId && HUMAN_ID_REGEX.test(share.displayId)) {
+      batch.update(doc(db, 'display_id_registry', share.displayId), {
+        status: 'RETIRED',
+        retiredAt: serverTimestamp(),
+        retiredReason: `Deleted Share #${share.shareNumber} from scheme ${fund.fundName}`,
+        updatedAt: serverTimestamp(),
       });
-      setPendingOfflineCount((prev) => prev + 1);
     }
+
+    if (share.portalToken) {
+      batch.delete(doc(db, 'portal_tokens', share.portalToken));
+    } else {
+      // Fallback for orphans if online
+      try {
+        const tokensRef = collection(db, 'portal_tokens');
+        const q = query(tokensRef, where('shareId', '==', shareId));
+        const qSnap = await getDocs(q);
+        qSnap.forEach((d) => {
+          batch.delete(doc(db, 'portal_tokens', d.id));
+        });
+      } catch (innerE) {
+        console.warn('Could not query portal tokens for deletion (might be offline):', innerE);
+      }
+    }
+
+    batch.set(doc(db, 'audits', audit.auditId), audit);
+    await batch.commit();
 
     setShares((prev) => prev.filter((s) => s.shareId !== shareId));
     await localDb.delete(managerId, 'shares', shareId);
@@ -4329,6 +3470,26 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     notificationService.send('Draw Updated', 'Changes saved successfully.', 'sync');
   };
 
+  // Authoritative Manager-Level Consolidated Ledger
+  const managerLedger: MaterializedLedger = useMemo(() => {
+    const activeFunds = funds.filter(f => f.status !== 'ended' && (!managerId || f.managerId === managerId));
+    const activeFundIds = new Set(activeFunds.map(f => f.fundId));
+    const activeFundLedgers = ledgers.filter(l => l.ledgerType === 'FUND_LEDGER' && l.fundId && activeFundIds.has(l.fundId));
+
+    return {
+      ledgerId: `ledger_mgr_${managerId || 'unknown'}`,
+      managerId: managerId || '',
+      ledgerType: 'MANAGER_LEDGER',
+      totalPool: activeFunds.reduce((sum, f) => sum + (f.totalPool || 0), 0),
+      totalCollected: activeFundLedgers.reduce((sum, l) => sum + (l.totalCollected || 0), 0),
+      totalDisbursed: activeFundLedgers.reduce((sum, l) => sum + (l.totalDisbursed || 0), 0),
+      totalArrears: activeFundLedgers.reduce((sum, l) => sum + (l.totalArrears || 0), 0),
+      activeFundCount: activeFunds.length,
+      totalShares: activeFunds.reduce((sum, f) => sum + (f.numberOfShares || 0), 0),
+      updatedAt: new Date().toISOString(),
+    };
+  }, [managerId, funds, ledgers]);
+
   return (
     <ChitFundContext.Provider
       value={{
@@ -4345,41 +3506,42 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         recordDispatch,
         audits,
         ledgers,
+        managerLedger,
         loading,
         activeFund,
-        pendingOfflineCount,
+        isOnline,
         acknowledgementState,
         showAcknowledgement,
         closeAcknowledgement,
         setActiveFundId,
-        createFund,
-        addShare,
-        createCycle,
-        saveCycleBills,
-        recordSharePayout,
-        revokeSharePayout,
-        updateCycleMetadata,
-        endFund,
-        revokeEndFund,
-        updateFundMetadata,
-        recordPayment,
-        finalizeCycleSettlement,
-        updateDrawStatus,
-        executeDrawAssignment,
-        updateShare,
-        deleteCurrentCycle,
-        deleteFund,
-        updateFundNameAndFrequency,
-        deleteShare,
-        createContact,
-        updateContact,
-        deleteContact,
-        createGroup,
-        updateGroup,
-        deleteGroup,
-        updateGroupMembers,
-        sendCampaign,
-        rebuildMaterializedState,
+        createFund: withOnlineGuard(createFund),
+        addShare: withOnlineGuard(addShare),
+        createCycle: withOnlineGuard(createCycle),
+        saveCycleBills: withOnlineGuard(saveCycleBills),
+        recordSharePayout: withOnlineGuard(recordSharePayout),
+        revokeSharePayout: withOnlineGuard(revokeSharePayout),
+        updateCycleMetadata: withOnlineGuard(updateCycleMetadata),
+        endFund: withOnlineGuard(endFund),
+        revokeEndFund: withOnlineGuard(revokeEndFund),
+        updateFundMetadata: withOnlineGuard(updateFundMetadata),
+        recordPayment: withOnlineGuard(recordPayment),
+        finalizeCycleSettlement: withOnlineGuard(finalizeCycleSettlement),
+        updateDrawStatus: withOnlineGuard(updateDrawStatus),
+        executeDrawAssignment: withOnlineGuard(executeDrawAssignment),
+        updateShare: withOnlineGuard(updateShare),
+        deleteCurrentCycle: withOnlineGuard(deleteCurrentCycle),
+        deleteFund: withOnlineGuard(deleteFund),
+        updateFundNameAndFrequency: withOnlineGuard(updateFundNameAndFrequency),
+        deleteShare: withOnlineGuard(deleteShare),
+        createContact: withOnlineGuard(createContact),
+        updateContact: withOnlineGuard(updateContact),
+        deleteContact: withOnlineGuard(deleteContact),
+        createGroup: withOnlineGuard(createGroup),
+        updateGroup: withOnlineGuard(updateGroup),
+        deleteGroup: withOnlineGuard(deleteGroup),
+        updateGroupMembers: withOnlineGuard(updateGroupMembers),
+        sendCampaign: withOnlineGuard(sendCampaign),
+        rebuildMaterializedState: withOnlineGuard(rebuildMaterializedState),
         getShareByPortalToken,
         fetchPaymentsPage,
         fetchAuditsPage,

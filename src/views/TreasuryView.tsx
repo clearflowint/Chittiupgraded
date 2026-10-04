@@ -19,7 +19,7 @@ interface TreasuryViewProps {
 }
 
 export const TreasuryView: React.FC<TreasuryViewProps> = ({ onOpenPaymentModal }) => {
-  const { payments, cycles, funds, ledgers, shares, fetchPaymentsPage } = useChitFund();
+  const { payments, cycles, funds, ledgers, shares, managerLedger, fetchPaymentsPage } = useChitFund();
 
   const [filterMethod, setFilterMethod] = useState<'all' | PaymentMethod>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -53,14 +53,15 @@ export const TreasuryView: React.FC<TreasuryViewProps> = ({ onOpenPaymentModal }
     }
   };
 
-  // Materialized Total Inflows (Derived from Ledger / Shares state - zero need to download all historical payments)
-  const chittiLedgerTotal = ledgers.find((l) => l.ledgerType === 'CHITTI_LEDGER')?.totalCollected;
-  const totalInflows = chittiLedgerTotal ?? shares.reduce((acc, s) => acc + ((s.totalCredits || 0) - (s.totalDebits || 0)), 0);
+  // Authoritative Manager-Level Consolidated Inflows & Outflows
+  const totalInflows = managerLedger.totalCollected ?? shares.reduce((acc, s) => acc + ((s.totalCredits || 0) - (s.totalDebits || 0)), 0);
 
-  // Total Outflows (Cycle winner payouts disbursed)
-  const totalOutflows = cycles
-    .filter(c => c.isAuctionClosed && c.winnerNetPayout)
-    .reduce((acc, c) => acc + (c.winnerNetPayout || 0), 0);
+  // Total Outflows (Manager-level disbursed or cycle winner payouts)
+  const totalOutflows = managerLedger.totalDisbursed > 0 
+    ? managerLedger.totalDisbursed 
+    : cycles
+        .filter(c => c.isAuctionClosed && c.winnerNetPayout)
+        .reduce((acc, c) => acc + (c.winnerNetPayout || 0), 0);
 
   // Net Liquidity
   const netLiquidity = totalInflows - totalOutflows;

@@ -35,7 +35,6 @@ interface AuthContextType {
   signUpWithEmail: (email: string, password: string) => Promise<void>;
   submitAccessRequest: (phone: string) => Promise<void>;
   signOut: (force?: boolean) => Promise<boolean>;
-  hasPendingSyncs: () => Promise<number>;
   verifyAccess: (user: User) => Promise<void>;
   sendPasswordReset: (email: string) => Promise<void>;
   updateManagerProfile: (data: { name: string; phone: string }) => Promise<void>;
@@ -220,20 +219,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthState('ACCESS_PENDING');
   };
 
-  const hasPendingSyncs = async (): Promise<number> => {
-    if (!tenant?.managerId) return 0;
-    const pending = await localDb.getPendingMutations(tenant.managerId);
-    return pending.length;
-  };
-
   const signOut = async (force = false): Promise<boolean> => {
     const prevManagerId = tenant?.managerId;
 
     if (prevManagerId) {
-      const pendingCount = await hasPendingSyncs();
-      if (pendingCount > 0 && !force) {
-        return false; // Indicate that logout was blocked by pending syncs
-      }
       await localDb.clearTenantCache(prevManagerId);
     }
 
@@ -283,7 +272,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         signUpWithEmail,
         submitAccessRequest,
         signOut,
-        hasPendingSyncs,
         verifyAccess,
         sendPasswordReset,
         updateManagerProfile,

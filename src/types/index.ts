@@ -86,7 +86,7 @@ export interface FinalReportSnapshot {
 
 export interface Fund {
   fundId: string;
-  displayId?: string; // 4-digit human ID (e.g. CF-2041)
+  displayId?: string; // 6-character human ID (e.g. A1B2C3)
   managerId: string;
   fundName: string;
   totalPool: number; // in Rupees
@@ -110,7 +110,7 @@ export interface Fund {
 
 export interface Share {
   shareId: string;
-  displayId?: string; // 4-digit human ID (e.g. SH-0104)
+  displayId?: string; // 6-character human ID (e.g. A1B2C3)
   managerId: string;
   fundId: string;
   contactId: string; // Canonical +91XXXXXXXXXX contact identifier
@@ -161,7 +161,7 @@ export interface Cycle {
 
 export interface Payment {
   paymentId: string;
-  displayId?: string; // 4-digit human ID (e.g. PAY-9821)
+  displayId?: string; // 6-character human ID (e.g. A1B2C3)
   managerId: string;
   fundId: string;
   contactId?: string;
@@ -220,13 +220,13 @@ export interface MaterializedLedger {
   ledgerId: string;
   managerId: string;
   fundId?: string;
-  ledgerType: 'CHITTI_LEDGER' | 'MANAGER_LEDGER';
+  ledgerType: 'FUND_LEDGER' | 'MANAGER_LEDGER'; // Canonical Fund & Manager Ledgers
   totalPool: number;
   totalCollected: number;
   totalDisbursed: number;
   totalArrears: number;
-  activeChittiCount?: number;
-  totalMembers?: number;
+  activeFundCount?: number;
+  totalShares?: number;
   updatedAt: string;
 }
 

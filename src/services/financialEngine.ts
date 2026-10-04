@@ -94,78 +94,73 @@ export class UniversalFinancialCore {
     return state;
   }
 
-  // Deprecated: Keeping for compatibility during migration if needed, 
-  // but it no longer reflects the true stateful logic.
-  static resolveBalance(
-    totalBilled: number,
-    totalPaid: number
-  ): { arrears: number; advance: number; balanceRupees: number; balancePaise: number } {
-    const billedPaise = this.toPaise(totalBilled);
-    const paidPaise = this.toPaise(totalPaid);
-    const diffPaise = paidPaise - billedPaise;
+  /**
+   * Verify double-entry and mathematical integrity across a Fund's shares, billings, payments, and payouts.
+   */
+  static verifyFundIntegrity(params: {
+    fundTotalPool: number;
+    shares: Array<{ totalCredits: number; totalDebits: number; arrears: number; advance: number; totalBilled: number }>;
+    billings: Array<{ billAmount: number }>;
+    payments: Array<{ amount: number; type?: string }>;
+    payouts: Array<{ amount: number; status: string }>;
+  }): {
+    isValid: boolean;
+    discrepancies: string[];
+    reconciledCollected: number;
+    reconciledDisbursed: number;
+    reconciledBilled: number;
+    reconciledArrears: number;
+    reconciledAdvance: number;
+    netLiquidity: number;
+  } {
+    const discrepancies: string[] = [];
 
-    if (diffPaise >= 0) {
-      return {
-        arrears: 0,
-        advance: this.toRupees(diffPaise),
-        balanceRupees: this.toRupees(diffPaise),
-        balancePaise: diffPaise,
-      };
-    } else {
-      return {
-        arrears: this.toRupees(Math.abs(diffPaise)),
-        advance: 0,
-        balanceRupees: this.toRupees(diffPaise),
-        balancePaise: diffPaise,
-      };
-    }
-  }
+    // Sum payments
+    const totalPaymentsCollected = params.payments.reduce((sum, p) => {
+      const type = (p.type || 'CREDIT').toUpperCase();
+      return type === 'CREDIT' ? sum + p.amount : sum - p.amount;
+    }, 0);
 
-  static allocatePayment(
-    amount: number,
-    currentCycleDue: number,
-    existingArrears: number
-  ) {
-    const amountPaise = this.toPaise(amount);
-    const currentDuePaise = this.toPaise(currentCycleDue);
-    const arrearsPaise = this.toPaise(existingArrears);
-
-    let remainingPaise = amountPaise;
-    let clearedArrearsPaise = 0;
-    let paidCurrentPaise = 0;
-    let advanceCreatedPaise = 0;
-
-    // Step 1: Clear pending arrears first
-    if (arrearsPaise > 0 && remainingPaise > 0) {
-      clearedArrearsPaise = Math.min(remainingPaise, arrearsPaise);
-      remainingPaise -= clearedArrearsPaise;
-    }
-
-    // Step 2: Pay regular current cycle due
-    if (currentDuePaise > 0 && remainingPaise > 0) {
-      paidCurrentPaise = Math.min(remainingPaise, currentDuePaise);
-      remainingPaise -= paidCurrentPaise;
-    }
-
-    // Step 3: Excess goes into advance credit
-    if (remainingPaise > 0) {
-      advanceCreatedPaise = remainingPaise;
-    }
-
-    const remainingArrearsPaise = Math.max(
-      0,
-      arrearsPaise - clearedArrearsPaise + (currentDuePaise - paidCurrentPaise)
+    // Sum share credits - debits
+    const totalShareNetPaid = params.shares.reduce(
+      (sum, s) => sum + (s.totalCredits - s.totalDebits),
+      0
     );
 
+    if (Math.abs(this.toPaise(totalPaymentsCollected) - this.toPaise(totalShareNetPaid)) > 1) {
+      discrepancies.push(
+        `Discrepancy in collections: payments sum to ₹${totalPaymentsCollected}, but shares sum to ₹${totalShareNetPaid}`
+      );
+    }
+
+    // Sum billings
+    const totalBillingsAmount = params.billings.reduce((sum, b) => sum + b.billAmount, 0);
+    const totalShareBilled = params.shares.reduce((sum, s) => sum + s.totalBilled, 0);
+
+    if (Math.abs(this.toPaise(totalBillingsAmount) - this.toPaise(totalShareBilled)) > 1) {
+      discrepancies.push(
+        `Discrepancy in billing: billing docs sum to ₹${totalBillingsAmount}, but shares sum to ₹${totalShareBilled}`
+      );
+    }
+
+    // Sum payouts
+    const totalDisbursed = params.payouts
+      .filter((p) => p.status === 'disbursed')
+      .reduce((sum, p) => sum + p.amount, 0);
+
+    const totalArrears = params.shares.reduce((sum, s) => sum + (s.arrears || 0), 0);
+    const totalAdvance = params.shares.reduce((sum, s) => sum + (s.advance || 0), 0);
+    const netLiquidity = totalPaymentsCollected - totalDisbursed;
+
     return {
-      clearedArrears: this.toRupees(clearedArrearsPaise),
-      paidCurrent: this.toRupees(paidCurrentPaise),
-      advanceCreated: this.toRupees(advanceCreatedPaise),
-      remainingArrears: this.toRupees(remainingArrearsPaise),
-      clearedArrearsPaise,
-      paidCurrentPaise,
-      advanceCreatedPaise,
-      remainingArrearsPaise,
+      isValid: discrepancies.length === 0,
+      discrepancies,
+      reconciledCollected: totalPaymentsCollected,
+      reconciledDisbursed: totalDisbursed,
+      reconciledBilled: totalBillingsAmount,
+      reconciledArrears: totalArrears,
+      reconciledAdvance: totalAdvance,
+      netLiquidity,
     };
   }
 }
@@ -319,18 +314,6 @@ export class FinancialEngine {
       // Ensure we use the correct divisor for dividend per share which IS always numberOfShares
       dividendPerShare: finalNumberOfShares > 0 ? Math.floor(result.dividendPool / finalNumberOfShares) : 0
     };
-  }
-
-  static resolveBalance(totalBilled: number, totalPaid: number) {
-    return UniversalFinancialCore.resolveBalance(totalBilled, totalPaid);
-  }
-
-  static allocatePayment(
-    amount: number,
-    currentCycleDue: number,
-    existingArrears: number
-  ) {
-    return UniversalFinancialCore.allocatePayment(amount, currentCycleDue, existingArrears);
   }
 
   static getLatestCycleReminder(fund: any, cycles: any[]) {

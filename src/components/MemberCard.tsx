@@ -19,6 +19,7 @@ interface MemberCardProps {
   share: Share;
   fund: Fund;
   currentCycle?: Cycle | null;
+  isOnline?: boolean;
   onEdit: (share: Share) => void;
   onStatement: (share: Share) => void;
   onDrawCorrection: (share: Share) => void;
@@ -33,6 +34,7 @@ export const MemberCard: React.FC<MemberCardProps> = ({
   share,
   fund,
   currentCycle,
+  isOnline = true,
   onEdit,
   onStatement,
   onDrawCorrection,
@@ -155,7 +157,13 @@ export const MemberCard: React.FC<MemberCardProps> = ({
       <div className="flex flex-wrap items-center gap-2">
         <button
           onClick={() => onEdit(share)}
-          className="flex items-center gap-1.5 py-2 px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition cursor-pointer shadow-xs min-h-[40px]"
+          disabled={!isOnline}
+          title={!isOnline ? "Editing member info requires internet connection" : "Edit member info"}
+          className={`flex items-center gap-1.5 py-2 px-3 rounded-xl border transition shadow-xs min-h-[40px] ${
+            isOnline 
+              ? 'border-slate-200 bg-white hover:bg-slate-50 text-slate-600 cursor-pointer' 
+              : 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'
+          }`}
         >
           <Edit3 className="w-4 h-4" />
           <span className="text-[11px] font-bold">Edit Info</span>
@@ -171,10 +179,14 @@ export const MemberCard: React.FC<MemberCardProps> = ({
 
         <button
           onClick={() => onDrawCorrection(share)}
-          className={`flex items-center gap-1.5 py-2 px-3 rounded-xl border transition cursor-pointer shadow-xs min-h-[40px] ${
-            isDrawn 
-              ? 'border-emerald-100 bg-emerald-50/30 text-emerald-600 hover:bg-emerald-50' 
-              : 'border-orange-100 bg-orange-50/30 text-orange-600 hover:bg-orange-50'
+          disabled={!isOnline}
+          title={!isOnline ? "Correcting draw status requires internet connection" : "Correct draw status"}
+          className={`flex items-center gap-1.5 py-2 px-3 rounded-xl border transition shadow-xs min-h-[40px] ${
+            !isOnline
+              ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'
+              : isDrawn 
+                ? 'border-emerald-100 bg-emerald-50/30 text-emerald-600 hover:bg-emerald-50 cursor-pointer' 
+                : 'border-orange-100 bg-orange-50/30 text-orange-600 hover:bg-orange-50 cursor-pointer'
           }`}
         >
           <Award className="w-4 h-4" />
@@ -184,7 +196,13 @@ export const MemberCard: React.FC<MemberCardProps> = ({
         {onEditBills && (
           <button
             onClick={() => onEditBills(share)}
-            className="flex items-center gap-1.5 py-2 px-3 rounded-xl border border-sky-100 bg-white hover:bg-sky-50 text-sky-600 transition cursor-pointer shadow-xs min-h-[40px]"
+            disabled={!isOnline}
+            title={!isOnline ? "Editing bills requires internet connection" : "Edit individual bills"}
+            className={`flex items-center gap-1.5 py-2 px-3 rounded-xl border transition shadow-xs min-h-[40px] ${
+              isOnline 
+                ? 'border-sky-100 bg-white hover:bg-sky-50 text-sky-600 cursor-pointer' 
+                : 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'
+            }`}
           >
             <Calculator className="w-4 h-4" />
             <span className="text-[11px] font-bold">Bills</span>
@@ -193,7 +211,13 @@ export const MemberCard: React.FC<MemberCardProps> = ({
 
         <button
           onClick={() => onReminder(share)}
-          className="flex items-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white transition cursor-pointer shadow-sm min-h-[40px]"
+          disabled={!isOnline}
+          title={!isOnline ? "Sending reminders requires internet connection" : "Send WhatsApp reminder"}
+          className={`flex items-center gap-1.5 py-2 px-3 rounded-xl text-white transition shadow-sm min-h-[40px] ${
+            isOnline 
+              ? 'bg-emerald-500 hover:bg-emerald-600 cursor-pointer' 
+              : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-60'
+          }`}
         >
           <MessageSquare className="w-4 h-4" />
           <span className="text-[11px] font-bold">Reminder</span>
@@ -202,8 +226,13 @@ export const MemberCard: React.FC<MemberCardProps> = ({
         {onWhatsApp && (
           <button
             onClick={() => onWhatsApp(share)}
-            className="flex items-center gap-1.5 py-2 px-3 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] text-white transition cursor-pointer shadow-sm min-h-[40px]"
-            title="Send WhatsApp update to member"
+            disabled={!isOnline}
+            title={!isOnline ? "Sending WhatsApp updates requires internet connection" : "Send WhatsApp update to member"}
+            className={`flex items-center gap-1.5 py-2 px-3 rounded-xl text-white transition shadow-sm min-h-[40px] ${
+              isOnline 
+                ? 'bg-[#25D366] hover:bg-[#20bd5a] cursor-pointer' 
+                : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-60'
+            }`}
           >
             <Send className="w-4 h-4" />
             <span className="text-[11px] font-bold">WhatsApp</span>
@@ -212,10 +241,16 @@ export const MemberCard: React.FC<MemberCardProps> = ({
 
         <button
           onClick={() => onRecordPayment(share)}
-          className="flex-1 min-w-[130px] flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white transition cursor-pointer shadow-md min-h-[40px]"
+          disabled={!isOnline}
+          title={!isOnline ? "Recording payment requires internet connection" : "Record Payment"}
+          className={`flex-1 min-w-[130px] flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-white transition shadow-md min-h-[40px] ${
+            isOnline 
+              ? 'bg-sky-600 hover:bg-sky-500 cursor-pointer' 
+              : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-60'
+          }`}
         >
           <CreditCard className="w-4 h-4" />
-          <span className="text-[11px] font-black">Record Payment</span>
+          <span className="text-[11px] font-black">{isOnline ? 'Record Payment' : 'Offline'}</span>
         </button>
       </div>
 

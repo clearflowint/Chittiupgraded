@@ -22,8 +22,8 @@ interface TopBarProps {
 }
 
 export const TopBar: React.FC<TopBarProps> = ({ currentTab, onNavigate, onOpenNewFundModal }) => {
-  const { tenant, signOut, hasPendingSyncs } = useAuth();
-  const { activeFund } = useChitFund();
+  const { tenant, signOut } = useAuth();
+  const { activeFund, isOnline } = useChitFund();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -49,17 +49,6 @@ export const TopBar: React.FC<TopBarProps> = ({ currentTab, onNavigate, onOpenNe
     setIsLoggingOut(true);
     
     try {
-      const pendingCount = await hasPendingSyncs();
-      if (pendingCount > 0) {
-        const confirmLogout = window.confirm(
-          `Warning: You have ${pendingCount} unsynchronized offline changes. \n\nLogging out will preserve these changes, but they will not be replayed until you sign in again. \n\nContinue with logout?`
-        );
-        if (!confirmLogout) {
-          setIsLoggingOut(false);
-          return;
-        }
-      }
-      
       const success = await signOut();
       if (success) {
         onNavigate('landing');
@@ -183,10 +172,16 @@ export const TopBar: React.FC<TopBarProps> = ({ currentTab, onNavigate, onOpenNe
               {/* 1 Primary Action Button: + New Fund Wizard */}
               <button
                 onClick={onOpenNewFundModal}
-                className="hidden sm:inline-flex items-center gap-2 px-4.5 py-2.5 text-xs font-black tracking-wide text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 border-2 border-sky-500 hover:border-sky-400 transition cursor-pointer shadow-md min-h-[44px] rounded-xl font-sans"
+                disabled={!isOnline}
+                title={!isOnline ? "New Fund creation requires internet connection" : "Create a new fund"}
+                className={`hidden sm:inline-flex items-center gap-2 px-4.5 py-2.5 text-xs font-black tracking-wide text-white border-2 transition shadow-md min-h-[44px] rounded-xl font-sans ${
+                  isOnline 
+                    ? 'bg-sky-600 hover:bg-sky-500 active:bg-sky-700 border-sky-500 hover:border-sky-400 cursor-pointer' 
+                    : 'bg-slate-700 border-slate-600 text-slate-400 cursor-not-allowed opacity-50'
+                }`}
               >
                 <Plus className="w-4 h-4 shrink-0 stroke-[2.5]" />
-                <span>New Fund</span>
+                <span>{isOnline ? 'New Fund' : 'Offline'}</span>
               </button>
 
               {/* Direct Visible Sign Out Text Button - Placed last (right) */}

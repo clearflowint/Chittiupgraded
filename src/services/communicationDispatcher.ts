@@ -201,17 +201,28 @@ export class CommunicationDispatcher {
       try {
         ackData = await res.json();
       } catch (e) {
-        // Not all webhooks return JSON bodies
+        console.warn('[ClearFlow Webhook] Non-JSON or empty response from webhook');
       }
 
-      if (ackData && ackData.accepted === false) {
+      // Invariant 24: ClearFlow must NOT show "received" unless:
+      // - request actually reached n8n
+      // - response is valid JSON object
+      // - accepted === true
+      // - dispatchId matches the submitted dispatch
+      if (
+        !ackData ||
+        typeof ackData !== 'object' ||
+        ackData.accepted !== true ||
+        !ackData.dispatchId ||
+        ackData.dispatchId !== payload.dispatchId
+      ) {
         return {
           success: false,
           event: payload.event,
           dispatchId: payload.dispatchId,
           batchId: payload.batchId,
           status: res.status,
-          error: ackData.message || 'Dispatch failed to start.',
+          error: ackData?.message || 'Invalid webhook response: receiver did not return accepted: true with matching dispatchId.',
           endpointUrl,
           payload,
         };
@@ -234,11 +245,59 @@ export class CommunicationDispatcher {
         event: payload.event,
         dispatchId: payload.dispatchId,
         batchId: payload.batchId,
-        error: 'Dispatch failed to start.',
+        error: 'Dispatch failed to reach webhook: Network error or timeout.',
         endpointUrl,
         payload,
       };
     }
+  }
+
+  /**
+   * Invariant 25: Validates and processes incoming webhook execution callbacks
+   */
+  static validateCallback(callback: any, expectedTenantId: string): {
+    valid: boolean;
+    error?: string;
+    sanitized?: {
+      dispatchId: string;
+      tenantId: string;
+      status: DispatchStatus;
+      sent?: number;
+      failed?: number;
+      skipped?: number;
+      total?: number;
+      errorMessage?: string;
+      completedAt?: string;
+    };
+  } {
+    if (!callback || typeof callback !== 'object') {
+      return { valid: false, error: 'Invalid callback payload: must be an object' };
+    }
+    if (!callback.dispatchId || typeof callback.dispatchId !== 'string') {
+      return { valid: false, error: 'Missing or invalid dispatchId' };
+    }
+    if (!callback.tenantId || typeof callback.tenantId !== 'string' || callback.tenantId !== expectedTenantId) {
+      return { valid: false, error: 'Tenant isolation violation: tenantId does not match authenticated tenant' };
+    }
+    const legalStatuses: DispatchStatus[] = ['received', 'processing', 'completed', 'failed'];
+    if (!callback.status || !legalStatuses.includes(callback.status)) {
+      return { valid: false, error: `Invalid status: "${callback.status}". Must be one of ${legalStatuses.join(', ')}` };
+    }
+
+    return {
+      valid: true,
+      sanitized: {
+        dispatchId: callback.dispatchId.trim(),
+        tenantId: callback.tenantId.trim(),
+        status: callback.status as DispatchStatus,
+        sent: typeof callback.sent === 'number' ? Math.max(0, callback.sent) : undefined,
+        failed: typeof callback.failed === 'number' ? Math.max(0, callback.failed) : undefined,
+        skipped: typeof callback.skipped === 'number' ? Math.max(0, callback.skipped) : undefined,
+        total: typeof callback.total === 'number' ? Math.max(0, callback.total) : undefined,
+        errorMessage: typeof callback.errorMessage === 'string' ? callback.errorMessage.slice(0, 500) : undefined,
+        completedAt: callback.status === 'completed' || callback.status === 'failed' ? (callback.completedAt || new Date().toISOString()) : undefined,
+      }
+    };
   }
 
   /**

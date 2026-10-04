@@ -82,7 +82,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   initialSubTab = 'members',
   isPortfolioOverview = false,
 }) => {
-  const { tenant, signOut, hasPendingSyncs } = useAuth();
+  const { tenant, signOut } = useAuth();
   const { 
     funds, 
     shares, 
@@ -97,7 +97,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     showAcknowledgement,
     campaigns,
     sendCampaign,
-    deleteCurrentCycle
+    deleteCurrentCycle,
+    isOnline
   } = useChitFund();
 
   // Search & Filter state for members
@@ -229,14 +230,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const handleSignOut = async () => {
     try {
-      const pendingCount = await hasPendingSyncs();
-      if (pendingCount > 0) {
-        const confirmLogout = window.confirm(
-          `Warning: You have ${pendingCount} unsynchronized offline changes. \n\nLogging out will preserve these changes, but they will not be replayed until you sign in again. \n\nContinue with logout?`
-        );
-        if (!confirmLogout) return;
-      }
-      
       const success = await signOut();
       if (success) {
         onNavigate('landing');
@@ -274,9 +267,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <button
               type="button"
               onClick={() => setIsProfileModalOpen(true)}
-              className="px-4 py-2 rounded-xl text-xs font-bold text-slate-900 bg-amber-400 hover:bg-amber-300 transition cursor-pointer shrink-0 shadow-xs"
+              disabled={!isOnline}
+              title={!isOnline ? "Completing profile requires internet connection" : "Complete profile"}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition shrink-0 shadow-xs ${
+                isOnline 
+                  ? 'text-slate-900 bg-amber-400 hover:bg-amber-300 cursor-pointer' 
+                  : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+              }`}
             >
-              Complete Profile
+              {isOnline ? 'Complete Profile' : 'Offline'}
             </button>
           </div>
         )}
@@ -341,10 +340,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <button
               onClick={() => setIsQuickPaymentOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white transition cursor-pointer shadow-xs min-h-[38px] whitespace-nowrap shrink-0"
+              disabled={!isOnline}
+              title={!isOnline ? "Payment recording requires internet connection" : "Record a payment"}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-white transition shadow-xs min-h-[38px] whitespace-nowrap shrink-0 ${
+                isOnline 
+                  ? 'bg-emerald-700 hover:bg-emerald-800 cursor-pointer' 
+                  : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+              }`}
             >
               <Plus className="w-3.5 h-3.5 text-emerald-200 shrink-0" />
-              <span>+ RECORD</span>
+              <span>{isOnline ? '+ RECORD' : 'OFFLINE'}</span>
             </button>
           </div>
 
@@ -356,10 +361,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <button
               onClick={onOpenNewFundModal}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-[#0284c7] hover:bg-[#0369a1] text-white transition cursor-pointer shadow-xs min-h-[38px] whitespace-nowrap shrink-0"
+              disabled={!isOnline}
+              title={!isOnline ? "Fund scheme creation requires internet connection" : "Launch new fund scheme"}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-white transition shadow-xs min-h-[38px] whitespace-nowrap shrink-0 ${
+                isOnline 
+                  ? 'bg-[#0284c7] hover:bg-[#0369a1] cursor-pointer' 
+                  : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+              }`}
             >
               <Plus className="w-3.5 h-3.5 text-white shrink-0" />
-              <span>+ New Fund</span>
+              <span>{isOnline ? '+ New Fund' : 'OFFLINE'}</span>
             </button>
           </div>
         </div>
@@ -575,9 +586,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <button
               onClick={onOpenCreateCycleModal}
-              className="py-3 px-6 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-black text-xs shadow-md transition cursor-pointer min-h-[44px]"
+              disabled={!isOnline}
+              title={!isOnline ? "Initializing a cycle requires internet connection" : "Initialize Cycle #1"}
+              className={`py-3 px-6 rounded-xl font-black text-xs shadow-md transition min-h-[44px] ${
+                isOnline 
+                  ? 'bg-sky-600 hover:bg-sky-500 text-white cursor-pointer' 
+                  : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+              }`}
             >
-              + Initialize Cycle #1
+              {isOnline ? '+ Initialize Cycle #1' : 'Cycle Init (Offline)'}
             </button>
           </div>
         ) : (
@@ -687,10 +704,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </p>
               <button
                 onClick={() => setIsAddMemberOpen(true)}
-                className="mx-auto px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 min-h-[40px]"
+                disabled={!isOnline}
+                title={!isOnline ? "Adding members requires internet connection" : "Add Your First Member"}
+                className={`mx-auto px-4 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 min-h-[40px] ${
+                  isOnline 
+                    ? 'bg-slate-900 hover:bg-slate-800 text-white cursor-pointer' 
+                    : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+                }`}
               >
                 <Plus className="w-3.5 h-3.5 text-emerald-400" />
-                <span>+ Add Your First Member</span>
+                <span>{isOnline ? '+ Add Your First Member' : 'Offline'}</span>
               </button>
             </div>
           ) : filteredShares.length === 0 ? (
@@ -704,6 +727,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 share={share}
                 fund={currentFund!}
                 currentCycle={currentCycle}
+                isOnline={isOnline}
                 onEdit={onOpenEditMemberModal}
                 onStatement={(s) => setStatementShare(s)}
                 onWhatsApp={(s) => onOpenWhatsAppReminderModal(s, 'single')}
@@ -721,18 +745,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="pt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-2">
           <button
             onClick={() => onOpenWhatsAppReminderModal(undefined, 'all-pending')}
-            className="w-full py-2.5 px-3 rounded-xl bg-[#16a34a] hover:bg-[#15803d] text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs min-h-[44px]"
+            disabled={!isOnline}
+            title={!isOnline ? "Reminders require internet connection" : "Send Reminder to All"}
+            className={`w-full py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs min-h-[44px] ${
+              isOnline 
+                ? 'bg-[#16a34a] hover:bg-[#15803d] text-white' 
+                : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+            }`}
           >
             <MessageSquare className="w-3.5 h-3.5" />
-            <span>Send Reminder to All ({pendingArrearsCount})</span>
+            <span>{isOnline ? `Send Reminder to All (${pendingArrearsCount})` : 'Reminders Disabled (Offline)'}</span>
           </button>
 
           <button
             onClick={() => setIsBulkStatementOpen(true)}
-            className="w-full py-2.5 px-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs min-h-[44px]"
+            disabled={!isOnline}
+            title={!isOnline ? "Bulk statements require internet connection" : "Send Statement to All"}
+            className={`w-full py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs min-h-[44px] ${
+              isOnline 
+                ? 'bg-sky-600 hover:bg-sky-500 text-white' 
+                : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+            }`}
           >
             <FileText className="w-3.5 h-3.5" />
-            <span>Send Statement to All ({filteredShares.length})</span>
+            <span>{isOnline ? `Send Statement to All (${filteredShares.length})` : 'Bulk Statements Disabled (Offline)'}</span>
           </button>
         </div>
 
@@ -740,10 +776,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="pt-1.5">
           <button
             onClick={() => setIsAddMemberOpen(true)}
-            className="w-full py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs min-h-[44px]"
+            disabled={!isOnline}
+            title={!isOnline ? "Adding members requires internet connection" : "Add Member / Share Allotment"}
+            className={`w-full py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs min-h-[44px] ${
+              isOnline 
+                ? 'bg-slate-900 hover:bg-slate-800 text-white' 
+                : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+            }`}
           >
             <Plus className="w-4 h-4 text-emerald-400" />
-            <span>+ Add Member / Share Allotment</span>
+            <span>{isOnline ? '+ Add Member / Share Allotment' : 'Add Member (Offline Required)'}</span>
           </button>
         </div>
       </div>
@@ -768,10 +810,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               setInputTotalCycles(currentFund.totalCycles || '');
               setIsTotalCyclesModalOpen(true);
             }}
-            className="px-3.5 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shadow-xs h-10"
+            disabled={!isOnline}
+            title={!isOnline ? "Editing planned cycles requires internet connection" : "Edit planned cycles"}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-xs h-10 ${
+              isOnline 
+                ? 'bg-sky-600 hover:bg-sky-500 text-white cursor-pointer' 
+                : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+            }`}
           >
             <Edit3 className="w-3.5 h-3.5 text-sky-100" />
-            <span>Edit</span>
+            <span>{isOnline ? 'Edit' : 'Offline'}</span>
           </button>
         </div>
 
@@ -789,10 +837,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           
           <button
             onClick={onOpenEditChittiNameModal}
-            className="px-3.5 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shadow-xs h-10 shrink-0"
+            disabled={!isOnline}
+            title={!isOnline ? "Editing fund identity requires internet connection" : "Edit fund identity"}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-xs h-10 shrink-0 ${
+              isOnline 
+                ? 'bg-sky-600 hover:bg-sky-500 text-white cursor-pointer' 
+                : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+            }`}
           >
             <Edit3 className="w-3.5 h-3.5 text-sky-100" />
-            <span>Edit</span>
+            <span>{isOnline ? 'Edit' : 'Offline'}</span>
           </button>
         </div>
 
@@ -810,10 +864,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           
           <button
             onClick={onOpenDeleteShareModal}
-            className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shadow-xs h-10 shrink-0"
+            disabled={!isOnline}
+            title={!isOnline ? "Deleting share requires internet connection" : "Delete share"}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-xs h-10 shrink-0 ${
+              isOnline 
+                ? 'bg-rose-600 hover:bg-rose-500 text-white cursor-pointer' 
+                : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+            }`}
           >
             <Trash2 className="w-3.5 h-3.5 text-rose-100" />
-            <span>Delete Share</span>
+            <span>{isOnline ? 'Delete Share' : 'Offline'}</span>
           </button>
         </div>
 
@@ -832,10 +892,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <button
               type="button"
               onClick={() => setIsProfileModalOpen(true)}
-              className="px-3.5 py-1.5 bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-800 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shadow-2xs"
+              disabled={!isOnline}
+              title={!isOnline ? "Editing profile requires internet connection" : "Edit profile"}
+              className={`px-3.5 py-1.5 border rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-2xs ${
+                isOnline 
+                  ? 'bg-sky-50 hover:bg-sky-100 border-sky-200 text-sky-800 cursor-pointer' 
+                  : 'bg-slate-700 border-slate-600 text-slate-400 cursor-not-allowed opacity-50'
+              }`}
             >
               <Edit3 className="w-3.5 h-3.5 text-sky-600" />
-              <span>{hasProfile ? 'Edit Profile' : 'Add Profile'}</span>
+              <span>{isOnline ? (hasProfile ? 'Edit Profile' : 'Add Profile') : 'Offline'}</span>
             </button>
           </div>
 

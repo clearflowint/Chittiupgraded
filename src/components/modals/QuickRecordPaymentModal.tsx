@@ -1,7 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useChitFund } from '../../context/ChitFundContext';
-import { FinancialEngine } from '../../services/financialEngine';
+import { FinancialEngine, UniversalFinancialCore } from '../../services/financialEngine';
 import { normalizePhoneNumber } from '../../utils/phone';
 import { Contact, Share, PaymentMethod } from '../../types';
 import { 
@@ -62,6 +62,13 @@ export const QuickRecordPaymentModal: React.FC<QuickRecordPaymentModalProps> = (
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('UPI');
   const [reference, setReference] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
+  const [formSessionId, setFormSessionId] = useState<string>(() => FinancialEngine.generateCryptoToken());
+
+  useEffect(() => {
+    if (isOpen) {
+      setFormSessionId(FinancialEngine.generateCryptoToken());
+    }
+  }, [isOpen, selectedShareId]);
 
   // Submission State
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -207,8 +214,8 @@ export const QuickRecordPaymentModal: React.FC<QuickRecordPaymentModalProps> = (
 
     try {
       const finalAmount = Number(amount);
-      const idempotencyKey = `qpay_${currentSelectedFund.fundId}_${currentSelectedShare.shareId}_${Date.now()}`;
-      const finalReference = reference.trim() || `QPAY-${Date.now().toString().slice(-6)}`;
+      const idempotencyKey = `qpay_${currentSelectedFund.fundId}_${currentSelectedShare.shareId}_${formSessionId}`;
+      const finalReference = reference.trim() || `QPAY-${formSessionId.slice(0, 6).toUpperCase()}`;
 
       // Use EXISTING authoritative payment-recording operation (Share-level financial activity)
       await recordPayment({
@@ -587,6 +594,52 @@ export const QuickRecordPaymentModal: React.FC<QuickRecordPaymentModalProps> = (
                   className="w-full px-3.5 py-2 text-xs sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-sans min-h-[40px]"
                 />
               </div>
+
+              {/* POST-TRANSACTION PROJECTION PREVIEW */}
+              {isPositiveAmount && (
+                <div className="bg-[#0f172a] text-white rounded-xl p-4 space-y-2 text-xs font-mono-nums border border-slate-800 shadow-inner">
+                  <div className="text-[9px] uppercase font-bold tracking-widest text-sky-400 font-sans border-b border-slate-800 pb-1.5 flex items-center justify-between">
+                    <span>POST-TRANSACTION PROJECTION</span>
+                    <span className="text-slate-500 font-normal">Calculated</span>
+                  </div>
+
+                  {(() => {
+                    const numericAmount = Number(amount) || 0;
+                    const nextState = UniversalFinancialCore.calculateNextState(
+                      {
+                        totalBilled: currentSelectedShare.totalBilled,
+                        totalCredits: currentSelectedShare.totalCredits,
+                        totalDebits: currentSelectedShare.totalDebits,
+                        arrears: currentSelectedShare.arrears,
+                        advance: currentSelectedShare.advance
+                      },
+                      { type: 'CREDIT', amount: numericAmount }
+                    );
+
+                    const projectedNetCredits = nextState.totalCredits - nextState.totalDebits;
+
+                    return (
+                      <div className="space-y-2 pt-0.5 text-[11px]">
+                        <div className="flex justify-between items-center text-slate-300">
+                          <span className="font-sans">Projected Net Paid:</span>
+                          <span className="font-bold text-white">
+                            {FinancialEngine.formatCurrency(projectedNetCredits)}
+                          </span>
+                        </div>
+
+                        <div className="flex justify-between items-center pt-2 border-t border-slate-800 font-semibold">
+                          <span className="font-sans text-slate-400">Net Balance Remaining:</span>
+                          <span className={nextState.arrears > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
+                            {nextState.arrears > 0 
+                              ? `-${FinancialEngine.formatCurrency(nextState.arrears)} Arrears` 
+                              : `+${FinancialEngine.formatCurrency(nextState.advance)} Advance`}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
           )}
 

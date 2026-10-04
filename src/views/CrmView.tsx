@@ -42,7 +42,8 @@ export const CrmView: React.FC = () => {
     updateGroupMembers,
     sendCampaign, 
     funds, 
-    shares 
+    shares,
+    isOnline
   } = useChitFund();
 
   // Tenant Isolation: Only show Contacts & Groups belonging to the currently authenticated manager/tenant
@@ -258,7 +259,6 @@ export const CrmView: React.FC = () => {
   const [newContactName, setNewContactName] = useState('');
   const [newContactPhone, setNewContactPhone] = useState('');
   const [newContactEmail, setNewContactEmail] = useState('');
-  const [newContactMembership, setNewContactMembership] = useState<'Existing Member' | 'Non-Member'>('Existing Member');
   const [contactError, setContactError] = useState<string | null>(null);
 
   // Edit Contact Form State
@@ -267,7 +267,6 @@ export const CrmView: React.FC = () => {
   const [editContactName, setEditContactName] = useState('');
   const [editContactPhone, setEditContactPhone] = useState('');
   const [editContactEmail, setNewContactEmailEdit] = useState('');
-  const [editContactMembership, setEditContactMembership] = useState<'Existing Member' | 'Non-Member'>('Existing Member');
   const [editContactError, setEditContactError] = useState<string | null>(null);
 
   // Delete Contact State
@@ -314,15 +313,15 @@ export const CrmView: React.FC = () => {
     );
   };
 
-  // Helper to determine if a contact is an Existing Member or Non-Member
+  // Canonical system classification (Part 4):
+  // Existing Member = Contact has at least one valid Share in ANY Fund belonging to the authenticated tenant.
+  // Otherwise: Non-Member.
+  // Never uses mutable tags or name matching.
   const isExistingMember = (c: Contact) => {
-    if (c.tags?.includes('Non-Member')) return false;
-    if (c.tags?.includes('Existing Member')) return true;
     const norm = normalizePhoneNumber(c.phone);
     return shares.some(s => 
       s.managerId === currentManagerId && 
-      (s.memberName.trim().toLowerCase() === c.name.trim().toLowerCase() ||
-       (s.memberPhone && normalizePhoneNumber(s.memberPhone) === norm))
+      (s.contactId === c.contactId || (s.contactId && s.contactId === norm) || (s.memberPhone && normalizePhoneNumber(s.memberPhone) === norm))
     );
   };
 
@@ -447,13 +446,12 @@ export const CrmView: React.FC = () => {
         name: newContactName.trim(),
         phone: newContactPhone, // Pass raw phone, createContact will normalize and upsert
         email: newContactEmail.trim() || undefined,
-        tags: [newContactMembership],
+        tags: [],
         communicationStatus: 'subscribed',
       });
       setNewContactName('');
       setNewContactPhone('');
       setNewContactEmail('');
-      setNewContactMembership('Existing Member');
       setContactError(null);
       setShowContactModal(false);
     } catch (err: any) {
@@ -469,7 +467,6 @@ export const CrmView: React.FC = () => {
     const cleanPhone = c.phone.replace(/^\+91/, '').replace(/\D/g, '');
     setEditContactPhone(cleanPhone || c.phone);
     setNewContactEmailEdit(c.email || '');
-    setEditContactMembership(c.tags?.includes('Non-Member') ? 'Non-Member' : 'Existing Member');
     setEditContactError(null);
     setShowEditContactModal(true);
   };
@@ -505,7 +502,7 @@ export const CrmView: React.FC = () => {
         name: editContactName.trim(),
         phone: normPhone,
         email: editContactEmail.trim() || undefined,
-        tags: [editContactMembership],
+        tags: editingContact.tags?.filter(t => t !== 'Non-Member' && t !== 'Existing Member') || [],
       });
       setShowEditContactModal(false);
       setEditingContact(null);
@@ -678,11 +675,16 @@ export const CrmView: React.FC = () => {
             <button
               type="button"
               onClick={handleImportPhoneContacts}
-              disabled={importingContacts}
-              className="px-3 py-1.5 text-xs font-semibold text-emerald-950 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 transition cursor-pointer flex items-center gap-1.5 rounded-lg shadow-xs min-h-[36px]"
+              disabled={importingContacts || !isOnline}
+              title={!isOnline ? "Importing contacts requires internet connection" : "Import contacts from phone"}
+              className={`px-3 py-1.5 text-xs font-semibold border transition flex items-center gap-1.5 rounded-lg shadow-xs min-h-[36px] ${
+                isOnline && !importingContacts
+                  ? 'text-emerald-950 bg-emerald-50 hover:bg-emerald-100 border-emerald-300 cursor-pointer'
+                  : 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed opacity-60'
+              }`}
             >
               <Smartphone className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>{importingContacts ? 'Importing...' : 'Import from Phone Contacts'}</span>
+              <span>{importingContacts ? 'Importing...' : isOnline ? 'Import from Phone Contacts' : 'Import Offline (Disabled)'}</span>
             </button>
           ) : (
             <div className="flex flex-col items-end">
@@ -711,18 +713,30 @@ export const CrmView: React.FC = () => {
               setContactError(null);
               setShowContactModal(true);
             }}
-            className="px-3.5 py-1.5 text-xs font-semibold text-slate-800 bg-white hover:bg-slate-50 border border-slate-300 transition cursor-pointer flex items-center gap-1.5 rounded-lg shadow-xs h-[36px]"
+            disabled={!isOnline}
+            title={!isOnline ? "Adding contacts requires internet connection" : "Add contact"}
+            className={`px-3.5 py-1.5 text-xs font-semibold border transition flex items-center gap-1.5 rounded-lg shadow-xs h-[36px] ${
+              isOnline
+                ? 'text-slate-800 bg-white hover:bg-slate-50 border-slate-300 cursor-pointer'
+                : 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed opacity-60'
+            }`}
           >
             <Plus className="w-3.5 h-3.5 text-slate-600" />
-            <span>Add Contact</span>
+            <span>{isOnline ? 'Add Contact' : 'Offline'}</span>
           </button>
 
           <button
             onClick={() => setShowCampaignModal(true)}
-            className="px-4 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 transition cursor-pointer flex items-center gap-1.5 rounded-lg shadow-xs h-[36px]"
+            disabled={!isOnline}
+            title={!isOnline ? "Launching campaigns requires internet connection" : "Launch campaign"}
+            className={`px-4 py-1.5 text-xs font-semibold text-white border transition flex items-center gap-1.5 rounded-lg shadow-xs h-[36px] ${
+              isOnline
+                ? 'bg-slate-900 hover:bg-slate-800 border-slate-900 cursor-pointer'
+                : 'bg-slate-700 border-slate-600 text-slate-400 cursor-not-allowed opacity-60'
+            }`}
           >
             <Send className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Launch Campaign</span>
+            <span>{isOnline ? 'Launch Campaign' : 'Offline'}</span>
           </button>
         </div>
       </div>
@@ -899,7 +913,13 @@ export const CrmView: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleOpenEditContact(c)}
-                          className="px-2 py-1 text-[11px] font-semibold text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200 rounded-md transition cursor-pointer flex items-center gap-1"
+                          disabled={!isOnline}
+                          title={!isOnline ? "Editing contacts requires internet connection" : "Edit contact"}
+                          className={`px-2 py-1 text-[11px] font-semibold border rounded-md transition flex items-center gap-1 ${
+                            isOnline
+                              ? 'text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-100 border-slate-200 cursor-pointer'
+                              : 'bg-slate-100 text-slate-400 border-slate-100 cursor-not-allowed opacity-60'
+                          }`}
                         >
                           <Edit2 className="w-3 h-3 text-slate-500" />
                           <span>Edit</span>
@@ -907,7 +927,13 @@ export const CrmView: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleOpenDeleteContact(c)}
-                          className="px-2 py-1 text-[11px] font-semibold text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100/80 border border-rose-200 rounded-md transition cursor-pointer flex items-center gap-1"
+                          disabled={!isOnline}
+                          title={!isOnline ? "Deleting contacts requires internet connection" : "Delete contact"}
+                          className={`px-2 py-1 text-[11px] font-semibold border rounded-md transition flex items-center gap-1 ${
+                            isOnline
+                              ? 'text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100/80 border-rose-200 cursor-pointer'
+                              : 'bg-slate-100 text-slate-400 border-slate-100 cursor-not-allowed opacity-60'
+                          }`}
                         >
                           <Trash2 className="w-3 h-3 text-rose-500" />
                           <span>Delete</span>
@@ -976,7 +1002,13 @@ export const CrmView: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => handleOpenEditContact(c)}
-                              className="px-2 py-1 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200 rounded-md transition cursor-pointer flex items-center gap-1"
+                              disabled={!isOnline}
+                              title={!isOnline ? "Editing contacts requires internet connection" : "Edit contact"}
+                              className={`px-2 py-1 text-xs font-semibold border rounded-md transition flex items-center gap-1 ${
+                                isOnline
+                                  ? 'text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-100 border-slate-200 cursor-pointer'
+                                  : 'bg-slate-100 text-slate-400 border-slate-100 cursor-not-allowed opacity-60'
+                              }`}
                             >
                               <Edit2 className="w-3 h-3 text-slate-500" />
                               <span>Edit</span>
@@ -984,7 +1016,13 @@ export const CrmView: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => handleOpenDeleteContact(c)}
-                              className="px-2 py-1 text-xs font-semibold text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100/80 border border-rose-200 rounded-md transition cursor-pointer flex items-center gap-1"
+                              disabled={!isOnline}
+                              title={!isOnline ? "Deleting contacts requires internet connection" : "Delete contact"}
+                              className={`px-2 py-1 text-xs font-semibold border rounded-md transition flex items-center gap-1 ${
+                                isOnline
+                                  ? 'text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100/80 border-rose-200 cursor-pointer'
+                                  : 'bg-slate-100 text-slate-400 border-slate-100 cursor-not-allowed opacity-60'
+                              }`}
                             >
                               <Trash2 className="w-3 h-3 text-rose-500" />
                               <span>Delete</span>
@@ -1017,10 +1055,16 @@ export const CrmView: React.FC = () => {
             <button
               type="button"
               onClick={() => setShowGroupModal(true)}
-              className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 shrink-0 shadow-xs"
+              disabled={!isOnline}
+              title={!isOnline ? "Creating contact groups requires internet connection" : "Create contact group"}
+              className={`px-3.5 py-2 text-xs font-semibold text-white border transition flex items-center justify-center gap-1.5 shrink-0 shadow-xs rounded-lg ${
+                isOnline
+                  ? 'bg-slate-900 hover:bg-slate-800 border-slate-900 cursor-pointer'
+                  : 'bg-slate-700 border-slate-600 text-slate-400 cursor-not-allowed opacity-60'
+              }`}
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>+ Create Contact Group</span>
+              <span>{isOnline ? '+ Create Contact Group' : 'Offline'}</span>
             </button>
           </div>
 
@@ -1038,10 +1082,16 @@ export const CrmView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowGroupModal(true)}
-                  className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition cursor-pointer shadow-xs"
+                  disabled={!isOnline}
+                  title={!isOnline ? "Creating contact groups requires internet connection" : "Create contact group"}
+                  className={`inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-white border transition shadow-xs rounded-lg ${
+                    isOnline
+                      ? 'bg-slate-900 hover:bg-slate-800 border-slate-900 cursor-pointer'
+                      : 'bg-slate-700 border-slate-600 text-slate-400 cursor-not-allowed opacity-60'
+                  }`}
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>+ Create Contact Group</span>
+                  <span>{isOnline ? '+ Create Contact Group' : 'Offline (Disabled)'}</span>
                 </button>
               </div>
             </div>
@@ -1087,8 +1137,13 @@ export const CrmView: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleOpenManageGroup(g)}
-                          className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 border border-slate-200 rounded-lg transition cursor-pointer flex items-center gap-1"
-                          title="Manage group member contacts"
+                          disabled={!isOnline}
+                          title={!isOnline ? "Managing group contacts requires internet connection" : "Manage group member contacts"}
+                          className={`px-2.5 py-1.5 text-xs font-semibold border rounded-lg transition flex items-center gap-1 ${
+                            isOnline
+                              ? 'text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 border-slate-200 cursor-pointer'
+                              : 'bg-slate-100 text-slate-400 border-slate-100 cursor-not-allowed opacity-60'
+                          }`}
                         >
                           <Users className="w-3.5 h-3.5 text-slate-500" />
                           <span>Manage Contacts</span>
@@ -1096,8 +1151,13 @@ export const CrmView: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleOpenEditGroup(g)}
-                          className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 border border-slate-200 rounded-lg transition cursor-pointer flex items-center gap-1"
-                          title="Edit group name or description"
+                          disabled={!isOnline}
+                          title={!isOnline ? "Editing group requires internet connection" : "Edit group name or description"}
+                          className={`px-2.5 py-1.5 text-xs font-semibold border rounded-lg transition flex items-center gap-1 ${
+                            isOnline
+                              ? 'text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 border-slate-200 cursor-pointer'
+                              : 'bg-slate-100 text-slate-400 border-slate-100 cursor-not-allowed opacity-60'
+                          }`}
                         >
                           <Edit2 className="w-3 h-3 text-slate-500" />
                           <span>Edit</span>
@@ -1105,8 +1165,13 @@ export const CrmView: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleOpenDeleteGroup(g)}
-                          className="px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100/80 border border-rose-200 rounded-lg transition cursor-pointer flex items-center gap-1"
-                          title="Delete contact group"
+                          disabled={!isOnline}
+                          title={!isOnline ? "Deleting group requires internet connection" : "Delete contact group"}
+                          className={`px-2.5 py-1.5 text-xs font-semibold border rounded-lg transition flex items-center gap-1 ${
+                            isOnline
+                              ? 'text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100/80 border-rose-200 cursor-pointer'
+                              : 'bg-slate-100 text-slate-400 border-slate-100 cursor-not-allowed opacity-60'
+                          }`}
                         >
                           <Trash2 className="w-3 h-3 text-rose-500" />
                           <span>Delete</span>
@@ -1119,7 +1184,13 @@ export const CrmView: React.FC = () => {
                           setTargetAudience(g.groupId);
                           setShowCampaignModal(true);
                         }}
-                        className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 hover:border-emerald-300 border border-slate-200 rounded-lg transition cursor-pointer flex items-center gap-1.5"
+                        disabled={!isOnline}
+                        title={!isOnline ? "Launching campaign requires internet connection" : "Launch Campaign"}
+                        className={`px-3 py-1.5 text-xs font-semibold border rounded-lg transition flex items-center gap-1.5 ${
+                          isOnline
+                            ? 'text-slate-800 bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 hover:border-emerald-300 border-slate-200 cursor-pointer'
+                            : 'bg-slate-100 text-slate-400 border-slate-100 cursor-not-allowed opacity-60'
+                        }`}
                       >
                         <Send className="w-3 h-3 text-emerald-600" />
                         <span>Launch Campaign</span>
@@ -1563,48 +1634,16 @@ export const CrmView: React.FC = () => {
                 />
               </div>
 
-              {/* Membership Classification */}
-              <div>
-                <label className="block text-[10px] font-bold text-sky-700 uppercase tracking-widest mb-1.5 ml-1">
-                  Membership Classification *
-                </label>
-                <div className="grid grid-cols-2 gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setEditContactMembership('Existing Member')}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between min-h-[48px] ${
-                      editContactMembership === 'Existing Member'
-                        ? 'border-2 border-emerald-600 bg-emerald-50/80 text-emerald-950 font-semibold shadow-xs'
-                        : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <UserCheck className={`w-4 h-4 ${editContactMembership === 'Existing Member' ? 'text-emerald-600' : 'text-slate-400'}`} />
-                      <span className="text-xs font-sans font-medium">Existing Member</span>
-                    </div>
-                    {editContactMembership === 'Existing Member' && (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setEditContactMembership('Non-Member')}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between min-h-[48px] ${
-                      editContactMembership === 'Non-Member'
-                        ? 'border-2 border-emerald-600 bg-emerald-50/80 text-emerald-950 font-semibold shadow-xs'
-                        : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <User className={`w-4 h-4 ${editContactMembership === 'Non-Member' ? 'text-emerald-600' : 'text-slate-400'}`} />
-                      <span className="text-xs font-sans font-medium">Non-Member</span>
-                    </div>
-                    {editContactMembership === 'Non-Member' && (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    )}
-                  </button>
-                </div>
+              {/* Automatic System Membership Classification Display */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-[11px] text-slate-500 font-sans space-y-1">
+                <span className="font-bold text-slate-800 block text-xs">
+                  System Classification: {editingContact && isExistingMember(editingContact) ? 'Existing Member' : 'Non-Member'}
+                </span>
+                <p className="leading-relaxed">
+                  {editingContact && isExistingMember(editingContact)
+                    ? 'This contact holds an active share in a fund for this tenant.'
+                    : 'This contact does not currently hold a fund share. Allotting a share will automatically classify them as an Existing Member.'}
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100">

@@ -7,7 +7,7 @@ interface NewFundWizardViewProps {
 }
 
 export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate }) => {
-  const { createFund, setActiveFundId } = useChitFund();
+  const { createFund, setActiveFundId, isOnline } = useChitFund();
 
   const [fundName, setFundName] = useState('Chit Fund Premium Series');
   const [cycleFrequency, setCycleFrequency] = useState<'monthly' | 'bi-weekly' | 'weekly'>('monthly');
@@ -150,11 +150,15 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
 
         <button
           type="button"
-          disabled={loading}
+          disabled={loading || !isOnline}
           onClick={handleFinish}
-          className="px-6 py-2.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+          className={`px-6 py-2.5 text-xs font-bold text-white disabled:opacity-50 rounded-xl transition flex items-center gap-1.5 shadow-sm ${
+            isOnline 
+              ? 'bg-emerald-700 hover:bg-emerald-800 cursor-pointer' 
+              : 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
+          }`}
         >
-          {loading ? 'Launching Scheme...' : 'Launch Fund'}
+          {loading ? 'Launching Scheme...' : isOnline ? 'Launch Fund' : 'Offline (Launch Disabled)'}
           <CheckCircle2 className="w-3.5 h-3.5" />
         </button>
       </div>

@@ -16,7 +16,10 @@ service cloud.firestore {
     }
 
     function isValidDisplayId(id) {
-      return id is string && id.size() == 4 && id.matches('^[A-Z][0-9][A-Z][0-9]$');
+      return id is string && (
+        (id.size() == 6 && id.matches('^[A-Z][0-9][A-Z][0-9][A-Z][0-9]$')) ||
+        (id.size() == 4 && id.matches('^[A-Z][0-9][A-Z][0-9]$'))
+      );
     }
 
     function isWhitelistedManager() {

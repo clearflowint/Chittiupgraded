@@ -85,42 +85,6 @@ export class DisplayIdRegistryService {
         }
       } catch (err: any) {
         console.warn(`Registry transaction error for candidate ${candidateId} (attempt ${attempt + 1}):`, err?.message || err);
-        
-        // If offline, check local cache and fallback gracefully
-        if (typeof navigator !== 'undefined' && !navigator.onLine) {
-          const cached = await localDb.getForTenant(managerId, 'app_cache', `reg_${candidateId}`);
-          if (!cached) {
-            await localDb.put(managerId, 'app_cache', {
-              id: `reg_${candidateId}`,
-              displayId: candidateId,
-              entityType,
-              entityId,
-              managerId,
-              status: 'ACTIVE',
-            });
-
-            // Queue authoritative reservation for when back online
-            await localDb.queueOfflineMutation({
-              operationId: `reserve_${candidateId}`,
-              managerId,
-              authUid,
-              collection: 'display_id_registry',
-              docId: candidateId,
-              type: 'set',
-              payload: {
-                displayId: candidateId,
-                entityType,
-                entityId,
-                managerId,
-                status: 'ACTIVE',
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              }
-            });
-          }
-          return candidateId;
-        }
-        
         if (attempt === maxAttempts - 1) throw err;
       }
     }
@@ -150,37 +114,6 @@ export class DisplayIdRegistryService {
     }
     
     return results;
-  }
-
-  /**
-   * Hardened Replay logic for Display ID reservation.
-   * Ensures that replay never overwrites an existing authoritative owner.
-   */
-  static async applyReplayReservation(payload: any): Promise<void> {
-    const { displayId, entityId } = payload;
-    
-    await runTransaction(db, async (tx) => {
-      const regRef = doc(db, 'display_id_registry', displayId);
-      const snap = await tx.get(regRef);
-
-      if (snap.exists()) {
-        const existingData = snap.data() as DisplayIdRegistryDoc;
-        if (existingData.entityId === entityId) {
-          // Idempotent success: we already own this ID in the registry
-          return;
-        }
-        // Collision: ID is owned by a DIFFERENT entity
-        throw new Error(`REGISTRY_COLLISION: Display ID ${displayId} is already reserved by entity ${existingData.entityId}. Manual recovery required.`);
-      }
-
-      // Safe to reserve during replay
-      tx.set(regRef, {
-        ...payload,
-        status: 'ACTIVE',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    });
   }
 
   /**
