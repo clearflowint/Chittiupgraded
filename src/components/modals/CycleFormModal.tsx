@@ -1,28 +1,96 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useChitFund } from '../../context/ChitFundContext';
 import { Fund, Cycle, Share } from '../../types';
-import { X, Calendar, AlertCircle, PlusCircle, ArrowRight, Save, ArrowLeft } from 'lucide-react';
+import { X, Calendar, AlertCircle, PlusCircle, ArrowRight, Save, ArrowLeft, Edit3 } from 'lucide-react';
 import { FinancialEngine } from '../../services/financialEngine';
 
-interface CreateCycleModalProps {
+interface CycleFormModalProps {
   isOpen: boolean;
   onClose: () => void;
   fund: Fund;
   cycles: Cycle[];
   initialSelectedCycleId?: string; 
-  mode?: 'create' | 'edit';
+  mode: 'create' | 'edit' | 'metadata_only';
+  cycle?: Cycle | null;
 }
 
-export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({ 
+export const CycleFormModal: React.FC<CycleFormModalProps> = ({ 
   isOpen, 
   onClose, 
   fund, 
   cycles, 
   initialSelectedCycleId,
-  mode = 'create'
+  mode,
+  cycle = null
 }) => {
-  const { createCycle, saveCycleBills, shares, billings, showAcknowledgement } = useChitFund();
+  const { 
+    createCycle, 
+    saveCycleBills, 
+    updateCycleMetadata,
+    shares, 
+    billings, 
+    showAcknowledgement 
+  } = useChitFund();
 
+  // -----------------------------------------------------------------
+  // 1. METADATA ONLY MODE (Legacy EditCycleModal implementation)
+  // -----------------------------------------------------------------
+  const [metaCycleName, setMetaCycleName] = useState<string>('');
+  const [metaStartDate, setMetaStartDate] = useState<string>('');
+  const [metaEndDate, setMetaEndDate] = useState<string>('');
+  const [metaLoading, setMetaLoading] = useState(false);
+  const [metaError, setMetaError] = useState<string | null>(null);
+
+  // Sync state for metadata-only mode
+  useEffect(() => {
+    if (isOpen && mode === 'metadata_only' && cycle) {
+      setMetaCycleName(cycle.cycleName || `Cycle #${cycle.cycleNumber || 1}`);
+      setMetaStartDate(cycle.startDate || cycle.auctionDate || new Date().toISOString().split('T')[0]);
+      setMetaEndDate(cycle.endDate || '');
+      setMetaError(null);
+    }
+  }, [isOpen, mode, cycle]);
+
+  const handleMetaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!cycle) return;
+
+    if (!metaCycleName.trim()) {
+      setMetaError('Cycle Name is required.');
+      return;
+    }
+    if (!metaStartDate) {
+      setMetaError('Start Date is required.');
+      return;
+    }
+    if (metaEndDate && metaEndDate < metaStartDate) {
+      setMetaError('End Date cannot be earlier than Start Date.');
+      return;
+    }
+
+    setMetaLoading(true);
+    setMetaError(null);
+
+    try {
+      await updateCycleMetadata({
+        fundId: fund.fundId,
+        cycleId: cycle.cycleId,
+        cycleName: metaCycleName.trim(),
+        startDate: metaStartDate,
+        endDate: metaEndDate ? metaEndDate : null,
+      });
+
+      setMetaLoading(false);
+      onClose();
+    } catch (err: any) {
+      setMetaError(err?.message || 'Failed to update cycle metadata');
+      setMetaLoading(false);
+    }
+  };
+
+  // -----------------------------------------------------------------
+  // 2. BILLING & CREATION MODE (Legacy CreateCycleModal implementation)
+  // -----------------------------------------------------------------
   // Filter cycles belonging only to this fund
   const fundCycles = useMemo(() => {
     return cycles
@@ -32,15 +100,14 @@ export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({
 
   const nextCycleNum = (fundCycles.length > 0 ? Math.max(...fundCycles.map((c) => c.cycleNumber)) : 0) + 1;
 
-  // Selected Cycle State
-  // If mode is 'create', we force 'new'. If 'edit', we default to initial or latest.
+  // Selected Cycle State (create/edit modes only)
   const [selectedCycleId, setSelectedCycleId] = useState<string | 'new'>(
     mode === 'create' ? 'new' : (initialSelectedCycleId || (fundCycles[0]?.cycleId || 'new'))
   );
 
   // Sync selectedCycleId when props change or modal opens
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && mode !== 'metadata_only') {
       if (mode === 'create') {
         setSelectedCycleId('new');
       } else {
@@ -93,7 +160,7 @@ export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({
 
   // Sync state when selectedCycleId changes
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || mode === 'metadata_only') return;
 
     setError(null);
     setStep(0);
@@ -123,14 +190,14 @@ export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({
       });
       setShareBills(initialBills);
     }
-  }, [selectedCycleId, activeCycle, isOpen, nextCycleNum, fundShares, billings]);
+  }, [selectedCycleId, activeCycle, isOpen, nextCycleNum, fundShares, billings, mode]);
 
   // Initialize selectedCycleId when prop changes
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && mode !== 'metadata_only') {
       setSelectedCycleId(initialSelectedCycleId || 'new');
     }
-  }, [initialSelectedCycleId, isOpen]);
+  }, [initialSelectedCycleId, isOpen, mode]);
 
   // --- CLASSIFICATION LOGIC (Relative to activeCycleNum) ---
   const group1Shares = useMemo(() => {
@@ -249,6 +316,116 @@ export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({
 
   if (!isOpen) return null;
 
+  // -----------------------------------------------------------------
+  // RENDER PATH A: METADATA ONLY VIEW
+  // -----------------------------------------------------------------
+  if (mode === 'metadata_only') {
+    if (!cycle) return null;
+    return (
+      <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-0 sm:p-2 overflow-y-auto">
+        <div className="w-full h-full sm:h-auto sm:max-h-[95vh] sm:max-w-md bg-white sm:rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col animate-in fade-in zoom-in-95">
+          
+          {/* Header */}
+          <div className="bg-[#0f172a] text-white px-5 py-4 flex items-center justify-between shrink-0 border-b border-slate-800">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-sky-600/30 border border-sky-400/30 text-sky-400 flex items-center justify-center">
+                <Edit3 className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-mono-nums tracking-widest text-sky-400 font-semibold block">
+                  CYCLE #{cycle.cycleNumber} · METADATA
+                </span>
+                <h2 className="text-sm font-bold text-white">
+                  Edit Cycle Metadata
+                </h2>
+              </div>
+            </div>
+            <button 
+              onClick={onClose}
+              className="text-slate-400 hover:text-white transition cursor-pointer p-1 rounded-lg"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {metaError && (
+            <div className="px-5 pt-4 shrink-0">
+              <div className="p-3 bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center gap-2 rounded-xl">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{metaError}</span>
+              </div>
+            </div>
+          )}
+
+          <form onSubmit={handleMetaSubmit} className="p-5 space-y-4">
+            <div>
+              <label className="block text-[10px] font-bold text-sky-700 uppercase tracking-widest mb-1.5 ml-1">
+                Cycle Name *
+              </label>
+              <input
+                type="text"
+                required
+                value={metaCycleName}
+                onChange={(e) => setMetaCycleName(e.target.value)}
+                placeholder="e.g. January Auction"
+                className="w-full px-3.5 py-2.5 text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-medium transition-all min-h-[44px]"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-bold text-sky-700 uppercase tracking-widest mb-1.5 ml-1">
+                  Start Date *
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={metaStartDate}
+                  onChange={(e) => setMetaStartDate(e.target.value)}
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-mono-nums min-h-[44px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-sky-700 uppercase tracking-widest mb-1.5 ml-1">
+                  End Date (Optional)
+                </label>
+                <input
+                  type="date"
+                  value={metaEndDate}
+                  onChange={(e) => setMetaEndDate(e.target.value)}
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-mono-nums min-h-[44px]"
+                />
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={onClose}
+                className="py-2.5 rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 transition cursor-pointer min-h-[44px]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={metaLoading}
+                className="py-2.5 rounded-xl text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-50 transition cursor-pointer shadow-xs min-h-[44px]"
+              >
+                {metaLoading ? 'Saving...' : 'Save Metadata'}
+              </button>
+            </div>
+          </form>
+
+        </div>
+      </div>
+    );
+  }
+
+  // -----------------------------------------------------------------
+  // RENDER PATH B: CREATION / EDIT BILLINGS VIEW
+  // -----------------------------------------------------------------
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-0 sm:p-4 overflow-y-auto font-sans animate-in fade-in duration-200">
       <div className="w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-3xl bg-white flex flex-col sm:rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in zoom-in-95 duration-200">

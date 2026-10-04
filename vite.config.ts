@@ -3,6 +3,34 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
+import fs from 'fs';
+import admin from 'firebase-admin';
+import { getApps, initializeApp } from 'firebase-admin/app';
+
+// Read Firebase Applet Config
+const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
+let firebaseConfig: any = {};
+try {
+  if (fs.existsSync(configPath)) {
+    firebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  }
+} catch (e) {
+  console.error('[ClearFlow Vite Config] Failed to read firebase config:', e);
+}
+
+// Initialize Firebase Admin SDK
+if (firebaseConfig.projectId) {
+  try {
+    if (getApps().length === 0) {
+      initializeApp({
+        projectId: firebaseConfig.projectId,
+      });
+      console.log('[ClearFlow Vite Config] Firebase Admin initialized for project:', firebaseConfig.projectId);
+    }
+  } catch (e) {
+    console.error('[ClearFlow Vite Config] Firebase Admin init error:', e);
+  }
+}
 
 export default defineConfig(() => {
   return {
@@ -25,9 +53,16 @@ export default defineConfig(() => {
             req.on('data', (chunk) => {
               body += chunk;
             });
-            req.on('end', () => {
+            req.on('end', async () => {
               try {
-                const secret = process.env.COMMUNICATION_CALLBACK_SECRET || 'clearflow_n8n_secret_prod_2026';
+                const secret = process.env.COMMUNICATION_CALLBACK_SECRET;
+                if (!secret) {
+                  res.statusCode = 500;
+                  res.setHeader('Content-Type', 'application/json');
+                  res.end(JSON.stringify({ success: false, error: 'Server configuration error: callback secret is not configured' }));
+                  return;
+                }
+
                 const authHeader = req.headers['authorization'] || req.headers['x-clearflow-callback-secret'];
 
                 if (!authHeader) {
@@ -70,26 +105,68 @@ export default defineConfig(() => {
                   return;
                 }
 
-                console.log(`[ClearFlow Dev Callback] Authenticated dispatch update for ${dispatchId} (Tenant: ${tenantId}):`, {
-                  status,
-                  total,
-                  sent,
-                  failed,
-                  skipped,
-                  errorMessage: errorMessage || null,
-                  completedAt: completedAt || new Date().toISOString(),
-                });
+                try {
+                  const db = admin.firestore();
+                  if (firebaseConfig.firestoreDatabaseId) {
+                    db.settings({ databaseId: firebaseConfig.firestoreDatabaseId });
+                  }
 
-                res.statusCode = 200;
-                res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({
-                  success: true,
-                  message: 'Dispatch callback authenticated and recorded',
-                  dispatchId,
-                  tenantId,
-                  status,
-                  receivedAt: new Date().toISOString(),
-                }));
+                  const dispatchRef = db.collection('dispatches').doc(dispatchId);
+                  const docSnap = await dispatchRef.get();
+
+                  if (!docSnap.exists) {
+                    res.statusCode = 404;
+                    res.setHeader('Content-Type', 'application/json');
+                    res.end(JSON.stringify({ success: false, error: `Dispatch record not found: ${dispatchId}` }));
+                    return;
+                  }
+
+                  const existingData = docSnap.data();
+
+                  if (existingData && existingData.tenantId !== tenantId) {
+                    res.statusCode = 403;
+                    res.setHeader('Content-Type', 'application/json');
+                    res.end(JSON.stringify({ success: false, error: 'Unauthorized: Tenant mismatch' }));
+                    return;
+                  }
+
+                  // Prepare update parameters safely (idempotent, preserve existing identities)
+                  const updateData: any = {
+                    status,
+                    updatedAt: new Date().toISOString(),
+                  };
+
+                  if (typeof total === 'number') updateData.total = total;
+                  if (typeof sent === 'number') updateData.sent = sent;
+                  if (typeof failed === 'number') updateData.failed = failed;
+                  if (typeof skipped === 'number') updateData.skipped = skipped;
+                  if (errorMessage !== undefined) updateData.errorMessage = errorMessage;
+                  
+                  if (status === 'completed' || status === 'failed') {
+                    updateData.completedAt = completedAt || new Date().toISOString();
+                  }
+
+                  // Write authoritative update to Firestore
+                  await dispatchRef.update(updateData);
+
+                  console.log(`[ClearFlow Dev Callback] Authenticated and updated dispatch ${dispatchId}:`, updateData);
+
+                  res.statusCode = 200;
+                  res.setHeader('Content-Type', 'application/json');
+                  res.end(JSON.stringify({
+                    success: true,
+                    message: 'Dispatch callback authenticated and recorded',
+                    dispatchId,
+                    tenantId,
+                    status,
+                    receivedAt: new Date().toISOString(),
+                  }));
+                } catch (dbErr: any) {
+                  console.error('[ClearFlow Dev Callback] Firestore database error:', dbErr);
+                  res.statusCode = 500;
+                  res.setHeader('Content-Type', 'application/json');
+                  res.end(JSON.stringify({ success: false, error: 'Internal server error while writing dispatch updates' }));
+                }
               } catch (e: any) {
                 res.statusCode = 400;
                 res.setHeader('Content-Type', 'application/json');

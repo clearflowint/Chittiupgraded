@@ -30,7 +30,6 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
         fundName: fundName.trim(),
         cycleFrequency,
         notes: notes.trim(),
-        memberList: [], // Start with 0 members
         totalPool: 0,   // Managed dynamically
         numberOfShares: 0, // Managed dynamically
         commissionPercent: 5, // Default metadata

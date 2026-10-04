@@ -345,7 +345,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (cPayments.length > 0) {
         setPayments(cPayments.map(p => {
           delete (p as any).cycleNumber;
-          delete (p as any).allocations;
           return p;
         }));
       }
@@ -392,7 +391,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               // Process authoritative financial data to remove legacy/derived fields that might conflict with UFC
               if (colName === 'payments') {
                 delete (itemData as any).cycleNumber;
-                delete (itemData as any).allocations;
               }
               list.push({ ...itemData, id: d.id } as unknown as T);
             });
@@ -429,7 +427,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               const itemData = d.data();
               if (colName === 'payments') {
                 delete (itemData as any).cycleNumber;
-                delete (itemData as any).allocations;
               }
               list.push({ ...itemData, id: d.id } as unknown as T);
             });
@@ -2357,7 +2354,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       snap.forEach((d) => {
         const itemData = d.data();
         delete (itemData as any).cycleNumber;
-        delete (itemData as any).allocations;
         items.push({ ...itemData, paymentId: d.id } as Payment);
       });
       items.sort((a, b) => new Date(b.paymentDate || b.createdAt).getTime() - new Date(a.paymentDate || a.createdAt).getTime());

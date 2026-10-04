@@ -11,7 +11,7 @@ import { CrmView } from './CrmView';
 import { AuditView } from './AuditView';
 import { FundsDirectoryView } from './FundsDirectoryView';
 import { SendReportModal } from '../components/modals/SendReportModal';
-import { AddMemberModal } from '../components/modals/AddMemberModal';
+import { MemberFormModal } from '../components/modals/MemberFormModal';
 import { QuickRecordPaymentModal } from '../components/modals/QuickRecordPaymentModal';
 import { ShareStatementModal } from '../components/modals/ShareStatementModal';
 import { BulkStatementModal } from '../components/modals/BulkStatementModal';
@@ -962,10 +962,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       )}
 
       {currentFund && (
-        <AddMemberModal
+        <MemberFormModal
           isOpen={isAddMemberOpen}
           onClose={() => setIsAddMemberOpen(false)}
           fund={currentFund}
+          mode="create"
         />
       )}
 

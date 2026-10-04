@@ -1,17 +1,27 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import { useChitFund } from '../../context/ChitFundContext';
-import { Fund } from '../../types';
+import { Fund, Share } from '../../types';
 import { normalizePhoneNumber, isValidPhoneNumber } from '../../utils/phone';
-import { X, UserPlus, AlertCircle, Search } from 'lucide-react';
+import { X, UserPlus, Edit3, User, AlertCircle, Search } from 'lucide-react';
 
-interface AddMemberModalProps {
+interface MemberFormModalProps {
   isOpen: boolean;
   onClose: () => void;
   fund: Fund;
+  share?: Share | null;
+  mode: 'create' | 'edit';
 }
 
-export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose, fund }) => {
-  const { addShare, contacts, shares, showAcknowledgement } = useChitFund();
+export const MemberFormModal: React.FC<MemberFormModalProps> = ({ 
+  isOpen, 
+  onClose, 
+  fund, 
+  share = null,
+  mode 
+}) => {
+  const { tenant } = useAuth();
+  const { addShare, updateShare, contacts, shares, showAcknowledgement } = useChitFund();
 
   const [memberName, setMemberName] = useState('');
   const [memberPhone, setMemberPhone] = useState('');
@@ -22,21 +32,31 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
   const [contactSearch, setContactSearch] = useState('');
   const [showContactResults, setShowContactSearch] = useState(false);
 
-  // Reset all modal state whenever the modal opens
+  // Sync state whenever modal opens or active share changes
   useEffect(() => {
     if (isOpen) {
-      setContactSearch('');
-      setShowContactSearch(false);
-      setMemberName('');
-      setMemberPhone('');
-      setSelectedContactId('');
       setError(null);
+      setShowContactSearch(false);
+      
+      if (mode === 'create') {
+        setContactSearch('');
+        setMemberName('');
+        setMemberPhone('');
+        setSelectedContactId('');
+      } else if (mode === 'edit' && share) {
+        setMemberName(share.memberName || '');
+        // Strip leading country code if present for cleaner input
+        const phoneDigits = share.memberPhone.replace(/^\+91\s?/, '');
+        setMemberPhone(phoneDigits);
+        setSelectedContactId(share.contactId || '');
+        setContactSearch(share.contactId ? (contacts.find(c => c.contactId === share.contactId)?.name || '') : '');
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, share, mode, contacts]);
 
-  // Evaluated ONLY against the currently active Fund (fund.fundId)
+  // Evaluated ONLY for create mode against the currently active Fund (fund.fundId)
   const isAlreadyMemberInCurrentFund = useMemo(() => {
-    if (!fund?.fundId || !shares || shares.length === 0) return false;
+    if (mode !== 'create' || !fund?.fundId || !shares || shares.length === 0) return false;
 
     // Check if selected CRM contact or entered phone already holds a Share in THIS active Fund ONLY
     if (selectedContactId) {
@@ -53,7 +73,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
     }
 
     return false;
-  }, [fund?.fundId, selectedContactId, memberPhone, shares]);
+  }, [fund?.fundId, selectedContactId, memberPhone, shares, mode]);
 
   if (!isOpen) return null;
 
@@ -72,6 +92,12 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
     setShowContactSearch(false);
   };
 
+  const managerDisplay = tenant?.email
+    ? tenant.email.replace(/(.{3})(.*)(@.*)/, '$1***$3')
+    : tenant?.name || 'Authorized Manager';
+
+  const shareDisplayId = share?.displayId || '----';
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!memberName.trim()) {
@@ -87,39 +113,60 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
     setLoading(true);
     setError(null);
 
+    const finalName = memberName.trim();
+    const finalPhone = normalizePhoneNumber(memberPhone);
+
     try {
-      const finalName = memberName.trim();
-      const finalPhone = normalizePhoneNumber(memberPhone);
-      const shareId = await addShare({
-        fundId: fund.fundId,
-        memberName: finalName,
-        memberPhone: finalPhone,
-        contactId: selectedContactId || undefined,
-      });
+      if (mode === 'create') {
+        const shareId = await addShare({
+          fundId: fund.fundId,
+          memberName: finalName,
+          memberPhone: finalPhone,
+          contactId: selectedContactId || undefined,
+        });
 
-      setLoading(false);
-      setMemberName('');
-      setMemberPhone('');
-      setSelectedContactId('');
-      onClose();
+        setLoading(false);
+        onClose();
 
-      showAcknowledgement({
-        isSuccess: true,
-        title: 'Member Allotted Successfully',
-        message: `Successfully registered member "${finalName}" to the Fund scheme.`,
-        operationType: 'ADD MEMBER ALLOTMENT',
-        referenceId: shareId || `REF-${Date.now().toString().slice(-6)}`,
-        ackTime: new Date().toLocaleTimeString(),
-      });
+        showAcknowledgement({
+          isSuccess: true,
+          title: 'Member Allotted Successfully',
+          message: `Successfully registered member "${finalName}" to the Fund scheme.`,
+          operationType: 'ADD MEMBER ALLOTMENT',
+          referenceId: shareId || `REF-${Date.now().toString().slice(-6)}`,
+          ackTime: new Date().toLocaleTimeString(),
+        });
+      } else {
+        if (!share) return;
+        await updateShare({
+          fundId: fund.fundId,
+          shareId: share.shareId,
+          memberName: finalName,
+          memberPhone: finalPhone,
+          contactId: selectedContactId || undefined,
+        });
+
+        setLoading(false);
+        onClose();
+
+        showAcknowledgement({
+          isSuccess: true,
+          title: 'Member Info Updated',
+          message: `Member details for "${finalName}" have been successfully saved.`,
+          operationType: 'EDIT MEMBER INFO',
+          referenceId: share.shareId,
+          ackTime: new Date().toLocaleTimeString(),
+        });
+      }
     } catch (err: any) {
-      setError(err?.message || 'Failed to add share allotment');
+      setError(err?.message || 'Failed to process member operation');
       setLoading(false);
       showAcknowledgement({
         isSuccess: false,
-        title: 'Member Allotment Failed',
-        message: err?.message || 'Could not allocate new share allotment.',
-        operationType: 'ADD MEMBER ALLOTMENT',
-        referenceId: `ERR-${Date.now().toString().slice(-6)}`,
+        title: mode === 'create' ? 'Member Allotment Failed' : 'Edit Member Failed',
+        message: err?.message || 'Could not commit member records changes.',
+        operationType: mode === 'create' ? 'ADD MEMBER ALLOTMENT' : 'EDIT MEMBER INFO',
+        referenceId: share?.shareId || `ERR-${Date.now().toString().slice(-6)}`,
         ackTime: new Date().toLocaleTimeString(),
       });
     }
@@ -127,19 +174,27 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-      <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-auto max-h-[95vh] flex flex-col animate-in fade-in zoom-in-95">
+      <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-auto max-h-[95vh] flex flex-col animate-in fade-in zoom-in-95 font-sans">
         
-        {/* Header - Dark Design matching example */}
+        {/* Header */}
         <div className="bg-[#0f172a] text-white px-5 py-4 flex items-center justify-between shrink-0 border-b border-slate-800">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-sky-600/20 flex items-center justify-center">
-              <UserPlus className="w-5 h-5 text-sky-400" />
+              {mode === 'create' ? (
+                <UserPlus className="w-5 h-5 text-sky-400" />
+              ) : (
+                <Edit3 className="w-4 h-4 text-sky-400" />
+              )}
             </div>
             <div>
-              <h2 className="text-sm font-bold tracking-wide">ADD MEMBER ALLOTMENT</h2>
-              <p className="text-[10px] text-slate-400 font-mono-nums uppercase tracking-tight truncate max-w-[200px]">
-                {fund.fundName}
-              </p>
+              <h2 className="text-sm font-bold tracking-wide">
+                {mode === 'create' ? 'ADD MEMBER ALLOTMENT' : 'EDIT MEMBER INFO'}
+              </h2>
+              {mode === 'create' && (
+                <p className="text-[10px] text-slate-400 font-mono-nums uppercase tracking-tight truncate max-w-[200px]">
+                  {fund.fundName}
+                </p>
+              )}
             </div>
           </div>
           <button 
@@ -149,6 +204,24 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {/* Read-Only Context Header (Edit Mode only) */}
+        {mode === 'edit' && share && (
+          <div className="bg-slate-50 border-b border-slate-200 px-5 py-3 font-mono-nums text-xs space-y-1 text-slate-800 shrink-0">
+            <div>
+              <span className="font-semibold text-slate-500">Tenant / Manager ID: </span>
+              <span className="text-slate-700">{managerDisplay}</span>
+            </div>
+            <div>
+              <span className="font-semibold text-slate-500">Fund ID: </span>
+              <span className="text-slate-700">{fund.displayId || fund.fundId} ({fund.fundName})</span>
+            </div>
+            <div>
+              <span className="font-semibold text-slate-500">Share ID: </span>
+              <span className="text-slate-700">[{shareDisplayId}]</span>
+            </div>
+          </div>
+        )}
 
         {/* Content Body */}
         <div className="p-5 space-y-4 overflow-y-auto">
@@ -160,10 +233,10 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
           )}
 
           <form onSubmit={handleSubmit} className="space-y-5">
-            {/* Contact Search Field (Section 1) */}
+            {/* Contact Search Field */}
             <div className="relative group">
               <label className="block text-[10px] font-bold text-sky-700 uppercase tracking-widest mb-1.5 ml-1">
-                Search CRM Contacts
+                {mode === 'create' ? 'Search CRM Contacts' : 'Link to CRM Contact'}
               </label>
               <div className="relative">
                 <Search className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400 group-focus-within:text-sky-500 transition-colors" />
@@ -176,8 +249,8 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
                     setShowContactSearch(true);
                   }}
                   disabled={contacts.length === 0}
-                  placeholder={contacts.length === 0 ? "No CRM contacts available..." : "Type name or phone..."}
-                  className="w-full pl-10 pr-4 py-3 text-base sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 transition-all font-medium placeholder-slate-400 shadow-sm disabled:opacity-50"
+                  placeholder={contacts.length === 0 ? "No CRM contacts available..." : "Type name or phone to find contact..."}
+                  className="w-full pl-10 pr-4 py-3 text-sm border border-slate-250 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 transition-all font-medium placeholder-slate-400 shadow-xs disabled:opacity-50"
                 />
               </div>
 
@@ -217,7 +290,9 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
 
               {contacts.length > 0 && (
                 <div className="mt-1.5 flex items-center justify-between px-1">
-                  <p className="text-[9px] text-slate-400 italic font-medium">Auto-populates fields below</p>
+                  <p className="text-[9px] text-slate-400 italic">
+                    {mode === 'create' ? 'Auto-populates fields below' : 'Updates fields below; remaining editable'}
+                  </p>
                   {selectedContactId && (
                     <button 
                       type="button"
@@ -227,7 +302,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
                       }}
                       className="text-[9px] font-bold text-rose-500 hover:text-rose-600 underline"
                     >
-                      Clear Selection
+                      {mode === 'create' ? 'Clear Selection' : 'Clear Link'}
                     </button>
                   )}
                 </div>
@@ -236,20 +311,25 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
 
             <div className="border-t border-slate-100 my-2"></div>
 
+            {/* Member Full Name */}
             <div>
               <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
                 Member Full Name
               </label>
-              <input
-                type="text"
-                required
-                value={memberName}
-                onChange={(e) => setMemberName(e.target.value)}
-                placeholder="e.g. Vikramaditya Singh"
-                className="w-full px-4 py-3 text-base sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-medium transition-all"
-              />
+              <div className="relative">
+                {mode === 'edit' && <User className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />}
+                <input
+                  type="text"
+                  required
+                  value={memberName}
+                  onChange={(e) => setMemberName(e.target.value)}
+                  placeholder="e.g. Vikramaditya Singh"
+                  className={`w-full ${mode === 'edit' ? 'pl-10 pr-3.5' : 'px-4'} py-3 text-base sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-medium transition-all min-h-[44px]`}
+                />
+              </div>
             </div>
 
+            {/* Phone Number / WhatsApp */}
             <div>
               <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
                 Phone Number (10 Digits)
@@ -271,7 +351,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
               <span className="text-[10px] text-slate-400 mt-1.5 ml-1 block font-medium">Exactly 10 digits required for WhatsApp automation</span>
             </div>
 
-            {/* Current-Fund Existing Member Warning Banner */}
+            {/* Current-Fund Existing Member Warning Banner (Create mode only) */}
             {isAlreadyMemberInCurrentFund && (
               <div className="p-3 bg-amber-50 border border-amber-200/90 text-amber-900 text-xs rounded-xl space-y-1 font-sans animate-in fade-in">
                 <div className="flex items-center gap-1.5 font-bold text-amber-800">
@@ -285,7 +365,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
             )}
 
             {/* Action buttons */}
-            <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100">
+            <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100 font-sans">
               <button
                 type="button"
                 onClick={onClose}
@@ -298,7 +378,9 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
                 disabled={loading || !memberName.trim() || !isValidPhoneNumber(memberPhone)}
                 className="py-3 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer shadow-md min-h-[48px]"
               >
-                {loading ? 'Allotting...' : 'Allot Share'}
+                {loading 
+                  ? (mode === 'create' ? 'Allotting...' : 'Saving...') 
+                  : (mode === 'create' ? 'Allot Share' : 'Save Changes')}
               </button>
             </div>
           </form>

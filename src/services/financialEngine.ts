@@ -196,26 +196,6 @@ export class ChittiDomainModule {
       winnerNetPayout,
     };
   }
-
-  static calculateAuctionCycle(params: {
-    totalPool: number;
-    numberOfShares?: number;
-    winningBidAmount: number;
-    commissionPercent?: number;
-    totalCycles?: number;
-    totalShares?: number;
-  }) {
-    const finalNumberOfShares = params.totalShares !== undefined ? params.totalShares : (params.numberOfShares || 0);
-    const cycleCount = params.totalCycles;
-    const divisor = cycleCount && cycleCount > 0 ? cycleCount : finalNumberOfShares;
-
-    return this.calculateCycleAuction({
-      totalPool: params.totalPool,
-      numberOfShares: divisor,
-      winningBidAmount: params.winningBidAmount,
-      commissionPercent: params.commissionPercent
-    });
-  }
 }
 
 export class FinancialEngine {

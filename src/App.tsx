@@ -11,12 +11,11 @@ import { NewChittiModal } from './components/modals/NewChittiModal';
 import { CycleBillingModal } from './components/modals/CycleBillingModal';
 import { PaymentRecordModal } from './components/modals/PaymentRecordModal';
 import { DrawAssignmentBillingModal } from './components/modals/DrawAssignmentBillingModal';
-import { EditMemberModal } from './components/modals/EditMemberModal';
+import { MemberFormModal } from './components/modals/MemberFormModal';
 import { WhatsAppReminderModal } from './components/modals/WhatsAppReminderModal';
 import { DeleteChittiModal } from './components/modals/DeleteChittiModal';
 import { ShareEditBillsModal } from './components/modals/ShareEditBillsModal';
-import { EditCycleModal } from './components/modals/EditCycleModal';
-import { CreateCycleModal } from './components/modals/CreateCycleModal';
+import { CycleFormModal } from './components/modals/CycleFormModal';
 import { EditChittiNameModal } from './components/modals/EditChittiNameModal';
 import { DeleteShareModal } from './components/modals/DeleteShareModal';
 
@@ -388,11 +387,12 @@ const MainAppContent: React.FC = () => {
 
       {/* Operational Modal 6: Edit Member Info (Section 10) */}
       {currentFund && (
-        <EditMemberModal
+        <MemberFormModal
           isOpen={isEditMemberModalOpen}
           onClose={() => setIsEditMemberModalOpen(false)}
           fund={currentFund}
           share={targetShareForEdit}
+          mode="edit"
         />
       )}
 
@@ -432,19 +432,21 @@ const MainAppContent: React.FC = () => {
         />
       )}
 
-      {/* Operational Modal 10: Edit Cycle */}
+      {/* Operational Modal 10: Edit Cycle (Metadata Only) */}
       {currentFund && targetCycleForEdit && (
-        <EditCycleModal
+        <CycleFormModal
           isOpen={isEditCycleModalOpen}
           onClose={() => setIsEditCycleModalOpen(false)}
-          fundId={currentFund.fundId}
+          fund={currentFund}
+          cycles={currentFundCycles}
           cycle={targetCycleForEdit}
+          mode="metadata_only"
         />
       )}
 
       {/* Operational Modal 11: Create / Edit Cycle Billing */}
       {currentFund && (
-        <CreateCycleModal
+        <CycleFormModal
           isOpen={isCreateCycleModalOpen}
           onClose={() => {
             setIsCreateCycleModalOpen(false);
