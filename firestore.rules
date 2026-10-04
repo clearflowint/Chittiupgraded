@@ -151,48 +151,49 @@ service cloud.firestore {
       allow delete: if false; // Immutable financial trail
     }
 
-    // Payment Allocations
-    match /allocations/{allocationId} {
-      allow get: if isTenantOwner(resource.data.managerId);
-      allow list: if isTenantOwner(resource.data.managerId);
-      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(allocationId);
-      allow update: if isTenantOwner(resource.data.managerId) 
-                    && request.resource.data.managerId == resource.data.managerId
-                    && request.resource.data.managerId == request.auth.uid;
-      allow delete: if isTenantOwner(resource.data.managerId);
+    // Standalone verification helper for Materialized Ledger
+    function isValidLedger(data) {
+      return data.ledgerId is string && data.ledgerId.size() <= 128
+             && data.managerId is string && data.managerId.size() <= 128
+             && data.fundId is string && data.fundId.size() <= 128
+             && data.ledgerType == 'FUND_LEDGER'
+             && data.totalPool is number
+             && data.totalCollected is number
+             && data.totalDisbursed is number
+             && data.totalArrears is number
+             && data.totalShares is number;
     }
 
-    // Financial Transactions
-    match /transactions/{transactionId} {
-      allow get: if isTenantOwner(resource.data.managerId);
-      allow list: if isTenantOwner(resource.data.managerId);
-      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(transactionId);
-      allow update: if isTenantOwner(resource.data.managerId) 
-                    && request.resource.data.managerId == resource.data.managerId
-                    && request.resource.data.managerId == request.auth.uid;
-      allow delete: if isTenantOwner(resource.data.managerId);
-    }
-
-    // Treasury Records
-    match /treasury/{recordId} {
-      allow get: if isTenantOwner(resource.data.managerId);
-      allow list: if isTenantOwner(resource.data.managerId);
-      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(recordId);
-      allow update: if isTenantOwner(resource.data.managerId) 
-                    && request.resource.data.managerId == resource.data.managerId
-                    && request.resource.data.managerId == request.auth.uid;
-      allow delete: if isTenantOwner(resource.data.managerId);
-    }
-
-    // Materialized Chitti & Manager Ledgers
+    // Materialized Chitti Ledgers (Highly restricted write authority to prevent arbitrary client changes)
     match /ledgers/{ledgerId} {
       allow get: if isTenantOwner(resource.data.managerId);
       allow list: if isTenantOwner(resource.data.managerId);
-      allow create: if isTenantOwner(request.resource.data.managerId) && isValidId(ledgerId);
-      allow update: if isTenantOwner(resource.data.managerId) 
+      allow create: if isTenantOwner(request.resource.data.managerId)
+                    && isValidId(ledgerId)
+                    && request.resource.data.ledgerId == ledgerId
+                    && request.resource.data.ledgerId == 'ledger_' + request.resource.data.fundId
+                    && isValidLedger(request.resource.data)
+                    && request.resource.data.totalCollected == 0
+                    && request.resource.data.totalDisbursed == 0
+                    && request.resource.data.totalArrears == 0
+                    && request.resource.data.totalPool == getAfter(/databases/$(database)/documents/funds/$(request.resource.data.fundId)).data.totalPool
+                    && request.resource.data.totalShares == getAfter(/databases/$(database)/documents/funds/$(request.resource.data.fundId)).data.numberOfShares;
+      allow update: if isTenantOwner(resource.data.managerId)
                     && request.resource.data.managerId == resource.data.managerId
-                    && request.resource.data.managerId == request.auth.uid;
-      allow delete: if isTenantOwner(resource.data.managerId);
+                    && request.resource.data.managerId == request.auth.uid
+                    && isValidLedger(request.resource.data)
+                    // Core ledger identity and specs are immutable to prevent arbitrary changes
+                    && request.resource.data.ledgerId == resource.data.ledgerId
+                    && request.resource.data.fundId == resource.data.fundId
+                    && request.resource.data.ledgerType == resource.data.ledgerType
+                    && request.resource.data.totalPool == resource.data.totalPool
+                    && request.resource.data.totalShares == resource.data.totalShares
+                    && request.resource.data.totalCollected >= 0
+                    && request.resource.data.totalDisbursed >= 0
+                    && request.resource.data.totalArrears >= 0;
+      allow delete: if isTenantOwner(resource.data.managerId)
+                    // Ledgers can only be deleted if the corresponding fund is deleted in the same write batch
+                    && !existsAfter(/databases/$(database)/documents/funds/$(resource.data.fundId));
     }
 
     // Marketing Campaigns

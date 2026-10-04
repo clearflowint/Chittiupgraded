@@ -86,13 +86,12 @@ export const LandingView: React.FC<LandingViewProps> = ({ onEnterApp }) => {
               <span>CLEARFLOW AUTOMATIONS</span>
             </div>
 
-            <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-slate-950 tracking-tight leading-[1.15]">
-              Automate your daily operations with ClearFlow.
+            <h1 className="tracking-tight leading-none">
+              <span className="block text-3xl sm:text-4xl lg:text-5xl font-black text-slate-950">Welcome</span>
+              <span className="block text-xs sm:text-sm font-bold text-slate-500 mt-2.5 lowercase tracking-wider">
+                please login to continue
+              </span>
             </h1>
-
-            <p className="text-xs sm:text-sm text-slate-500 leading-relaxed max-w-xl font-normal font-sans">
-              Manage members, billing, payments, payouts, reminders and records — all in one simple workspace. Crafted to ensure absolute clarity for operations of all sizes.
-            </p>
 
             <div className="hidden sm:flex items-center gap-4 text-xs text-slate-400 font-mono-nums pt-1">
               <span>✓ Members</span>
@@ -110,7 +109,7 @@ export const LandingView: React.FC<LandingViewProps> = ({ onEnterApp }) => {
           </div>
 
           {/* Secure Login Form Right Column (Direct Inputs inside the Card) */}
-          <div className="lg:col-span-5 flex items-center justify-center">
+          <div className="lg:col-span-5 flex flex-col items-center justify-center gap-4">
             <div className="w-full max-w-sm bg-white border border-slate-200 shadow-md rounded-2xl overflow-hidden font-sans">
               
               {/* Header */}
@@ -237,6 +236,10 @@ export const LandingView: React.FC<LandingViewProps> = ({ onEnterApp }) => {
 
               </div>
             </div>
+
+            <p className="text-xs sm:text-sm text-slate-500 leading-relaxed max-w-sm font-normal font-sans text-center">
+              Manage members, billing, payments, payouts, reminders and records — all in one simple workspace. Crafted to ensure absolute clarity for operations of all sizes.
+            </p>
           </div>
 
         </div>

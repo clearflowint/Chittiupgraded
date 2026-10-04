@@ -44,7 +44,7 @@
         "managerId": { "type": "string" },
         "name": { "type": "string" },
         "description": { "type": "string" },
-        "memberIds": { "type": "array", "items": { "type": "string" } },
+        "contactIds": { "type": "array", "items": { "type": "string" } },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
@@ -79,7 +79,7 @@
         "shareId": { "type": "string" },
         "managerId": { "type": "string" },
         "fundId": { "type": "string" },
-        "memberId": { "type": "string" },
+        "contactId": { "type": "string" },
         "memberName": { "type": "string" },
         "memberPhone": { "type": "string" },
         "shareNumber": { "type": "number" },
@@ -95,7 +95,7 @@
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
-      "required": ["shareId", "managerId", "fundId", "memberId", "shareNumber"]
+      "required": ["shareId", "managerId", "fundId", "contactId", "shareNumber"]
     },
     "cycle": {
       "title": "Cycle",
@@ -110,7 +110,7 @@
         "auctionDate": { "type": "string" },
         "winningBidAmount": { "type": "number" },
         "winnerShareId": { "type": "string" },
-        "winnerMemberId": { "type": "string" },
+        "winnerContactId": { "type": "string" },
         "winnerMemberName": { "type": "string" },
         "organizerCommission": { "type": "number" },
         "dividendPool": { "type": "number" },
@@ -133,7 +133,7 @@
         "paymentId": { "type": "string" },
         "managerId": { "type": "string" },
         "fundId": { "type": "string" },
-        "memberId": { "type": "string" },
+        "contactId": { "type": "string" },
         "shareId": { "type": "string" },
         "cycleNumber": { "type": "number" },
         "amount": { "type": "number" },
@@ -145,47 +145,7 @@
         "verificationStatus": { "type": "string" },
         "createdAt": { "type": "string" }
       },
-      "required": ["paymentId", "managerId", "fundId", "memberId", "amount", "paymentDate"]
-    },
-    "allocation": {
-      "title": "Allocation",
-      "description": "Payment installment breakdown allocation",
-      "type": "object",
-      "properties": {
-        "allocationId": { "type": "string" },
-        "managerId": { "type": "string" },
-        "paymentId": { "type": "string" },
-        "cycleNumber": { "type": "number" },
-        "amount": { "type": "number" },
-        "type": { "type": "string" }
-      },
-      "required": ["allocationId", "managerId", "amount", "type"]
-    },
-    "transaction": {
-      "title": "Transaction",
-      "description": "Financial debit or credit ledger movement",
-      "type": "object",
-      "properties": {
-        "transactionId": { "type": "string" },
-        "managerId": { "type": "string" },
-        "fundId": { "type": "string" },
-        "amount": { "type": "number" },
-        "type": { "type": "string" },
-        "timestamp": { "type": "string" }
-      },
-      "required": ["transactionId", "managerId", "amount", "type", "timestamp"]
-    },
-    "treasury": {
-      "title": "Treasury",
-      "description": "Cash flow and liquidity position snapshot",
-      "type": "object",
-      "properties": {
-        "recordId": { "type": "string" },
-        "managerId": { "type": "string" },
-        "balance": { "type": "number" },
-        "updatedAt": { "type": "string" }
-      },
-      "required": ["recordId", "managerId", "balance"]
+      "required": ["paymentId", "managerId", "fundId", "contactId", "amount", "paymentDate"]
     },
     "campaign": {
       "title": "Campaign",
@@ -287,7 +247,7 @@
         "fundId": { "type": "string" },
         "cycleId": { "type": "string" },
         "shareId": { "type": "string" },
-        "memberId": { "type": "string" },
+        "contactId": { "type": "string" },
         "amount": { "type": "number" },
         "amountPaise": { "type": "number" },
         "payoutDate": { "type": "string" },
@@ -398,18 +358,6 @@
     "/payments/{paymentId}": {
       "schema": "payment",
       "description": "Recorded member payments"
-    },
-    "/allocations/{allocationId}": {
-      "schema": "allocation",
-      "description": "Payment installment breakdown allocations"
-    },
-    "/transactions/{transactionId}": {
-      "schema": "transaction",
-      "description": "Financial debit/credit transaction records"
-    },
-    "/treasury/{recordId}": {
-      "schema": "treasury",
-      "description": "Treasury balance records"
     },
     "/ledgers/{ledgerId}": {
       "schema": "ledger",

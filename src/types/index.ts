@@ -4,6 +4,17 @@ export type CycleStatus = 'upcoming' | 'bidding' | 'finalized';
 export type PaymentMethod = 'UPI' | 'Bank' | 'Cash';
 export type CampaignStatus = 'draft' | 'queued' | 'sent';
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /tenants
+ * - Document Identity: tenantId matches the Firebase Auth UID.
+ * - Tenant Ownership: Owned by the authenticated manager/tenant (request.auth.uid == tenantId).
+ * - Parent Relationship: Root collection.
+ * - Who Creates It: Automatically created during manager signup.
+ * - Who Updates It: The authenticated manager (for name/phone defaults).
+ * - Who Deletes It: NEVER deleted via client SDK.
+ * - Authoritative/Derived: Authoritative master configuration.
+ * - Client Writes Permitted: Yes, but strictly isolated to their own Auth UID.
+ */
 export interface Tenant {
   managerId: string;
   authUid: string;
@@ -18,6 +29,17 @@ export interface Tenant {
   status: 'active' | 'suspended';
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /contacts
+ * - Document Identity: contactId is the normalized phone number prefix-protected (+91...).
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Root collection.
+ * - Who Creates It: Managers on CRM view or automatically during contact import.
+ * - Who Updates It: Managers on CRM view.
+ * - Who Deletes It: Managers on CRM view.
+ * - Authoritative/Derived: Authoritative.
+ * - Client Writes Permitted: Yes, restricted to the owning tenant.
+ */
 export interface Contact {
   contactId: string; // Normalized phone number as unique identifier
   managerId: string;
@@ -32,6 +54,17 @@ export interface Contact {
   updatedAt: string;
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /groups
+ * - Document Identity: groupId is a randomized UUID.
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Root collection.
+ * - Who Creates It: Managers on CRM segment view.
+ * - Who Updates It: Managers (adding/removing contactIds).
+ * - Who Deletes It: Managers.
+ * - Authoritative/Derived: Authoritative contact segment grouping.
+ * - Client Writes Permitted: Yes, restricted to the owning tenant.
+ */
 export interface Group {
   groupId: string;
   displayId?: string;
@@ -84,6 +117,17 @@ export interface FinalReportSnapshot {
   }>;
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /funds
+ * - Document Identity: fundId is a randomized UUID.
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Root collection.
+ * - Who Creates It: Managers via NewFundWizardView.
+ * - Who Updates It: Managers (editing name, frequency, status, final reports).
+ * - Who Deletes It: Managers (batch deletes fund and all its child shares/cycles/billings/payouts).
+ * - Authoritative/Derived: Authoritative scheme identifier.
+ * - Client Writes Permitted: Yes, restricted to the owning tenant.
+ */
 export interface Fund {
   fundId: string;
   displayId?: string; // 6-character human ID (e.g. A1B2C3)
@@ -108,6 +152,17 @@ export interface Fund {
   updatedAt: string;
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /shares
+ * - Document Identity: shareId is a randomized UUID.
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Child of /funds/{fundId} (referenced via fundId).
+ * - Who Creates It: Managers on adding a member allotment.
+ * - Who Updates It: Rebuilt/recalculated dynamically by rebuildMaterializedState based on billings/payments.
+ * - Who Deletes It: Managers on removing allotment or fund deletion.
+ * - Authoritative/Derived: Derived/materialized financial state based on authoritative payments and billings.
+ * - Client Writes Permitted: Yes, restricted to the owning tenant.
+ */
 export interface Share {
   shareId: string;
   displayId?: string; // 6-character human ID (e.g. A1B2C3)
@@ -131,6 +186,17 @@ export interface Share {
   updatedAt: string;
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /cycles
+ * - Document Identity: cycleId is a randomized UUID.
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Child of /funds/{fundId}.
+ * - Who Creates It: Managers on cycle initialization or creation.
+ * - Who Updates It: Managers (setting winning bid, finalizing cycle).
+ * - Who Deletes It: Managers on cycle delete or fund deletion.
+ * - Authoritative/Derived: Authoritative cycle and auction rotation specification.
+ * - Client Writes Permitted: Yes, restricted to the owning tenant.
+ */
 export interface Cycle {
   cycleId: string;
   displayId?: string;
@@ -159,6 +225,17 @@ export interface Cycle {
   finalizedAt?: string | null;
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /payments
+ * - Document Identity: paymentId is a randomized UUID.
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Child of /shares/{shareId} (referenced via shareId).
+ * - Who Creates It: Managers on recording a payment.
+ * - Who Updates It: NEVER (immutable trial once written, ensures idempotency).
+ * - Who Deletes It: NEVER (immutable financial trail).
+ * - Authoritative/Derived: Authoritative credit/debit transaction log.
+ * - Client Writes Permitted: Yes (create-only), restricted to the owning tenant. Update/delete are blocked.
+ */
 export interface Payment {
   paymentId: string;
   displayId?: string; // 6-character human ID (e.g. A1B2C3)
@@ -180,6 +257,17 @@ export interface Payment {
   createdAt: string;
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /billings
+ * - Document Identity: billingId is `${managerId}_${cycleId}_${shareId}`.
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Child of /cycles/{cycleId} and /shares/{shareId}.
+ * - Who Creates It: Automatically created during cycle initialization (saveCycleBills).
+ * - Who Updates It: Managers (adjusting cycle bill amounts on a share).
+ * - Who Deletes It: Managers on cycle delete or fund deletion.
+ * - Authoritative/Derived: Authoritative billing obligation record.
+ * - Client Writes Permitted: Yes, restricted to the owning tenant.
+ */
 export interface Billing {
   billingId: string; // `${managerId}_${cycleId}_${shareId}`
   managerId: string;
@@ -195,6 +283,17 @@ export interface Billing {
   version?: number;
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /payouts
+ * - Document Identity: payoutId is a randomized UUID.
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Child of /cycles/{cycleId} (referenced via cycleId).
+ * - Who Creates It: Managers on recording a winner payout.
+ * - Who Updates It: Managers (updating status/paymentMethod/reference).
+ * - Who Deletes It: Managers on cycle delete or fund deletion.
+ * - Authoritative/Derived: Authoritative financial disbursement event.
+ * - Client Writes Permitted: Yes, restricted to the owning tenant.
+ */
 export interface Payout {
   payoutId: string;
   managerId: string;
@@ -216,6 +315,17 @@ export interface Payout {
   idempotencyKey?: string;
 }
 
+/**
+ * DATABASE CONTRACT - COLLECTION: /ledgers
+ * - Document Identity: ledgerId is `ledger_${fundId}` (for FUND_LEDGER).
+ * - Tenant Ownership: Isolated by managerId == request.auth.uid.
+ * - Parent Relationship: Child of /funds/{fundId}.
+ * - Who Creates It: Created automatically when a Fund scheme is initialized.
+ * - Who Updates It: Updated only during state rebuilds (rebuildMaterializedState) after payments/payouts changes.
+ * - Who Deletes It: Managers (deleted when Fund is deleted).
+ * - Authoritative/Derived: Derived/materialized ledger positions.
+ * - Client Writes Permitted: Yes, but client writes are highly restricted by firestore.rules to prevent arbitrary modifications.
+ */
 export interface MaterializedLedger {
   ledgerId: string;
   managerId: string;
