@@ -1,35 +1,57 @@
-import { Fund, Share, Cycle, Billing, Payment } from '../types';
-import { FinancialEngine } from './financialEngine';
+import { Fund, Share, Cycle, Billing, Payment, Payout } from '../types';
+import { FinancialEngine, UniversalFinancialCore, FinancialEvent } from './financialEngine';
 import { WebhookStatement } from '../types/communication';
 
 export interface ShareStatementData {
   fundName: string;
-  fundStartDate: string;
+  fundStartDate: string | null;
   shareDisplayId: string;
+  shareId: string;
   shareNumber: number;
   memberName: string;
   memberPhone: string;
   managerName: string;
   managerPhone: string;
+  
+  // Dynamic Cycle progress
+  cyclesCompleted: number;
   currentCycle: number | null;
   totalCycles: number | null;
-  currentStatus: string;
-  pendingAmount: number;
-  advanceAmount: number;
+  cyclesLeft: number | null;
+  
+  // Current Financial Position
   totalBilled: number;
   totalPaid: number;
+  totalCredits: number;
+  totalDebits: number;
+  pendingAmount: number;
+  advanceAmount: number;
+  currentStatus: 'Pending' | 'Advance' | 'Up to date';
+  statusSummaryText: string;
+
+  // Billing History
   billingHistory: Array<{
+    billingId: string;
+    cycleId: string;
     cycleNumber: number;
+    cycleName: string | null;
     billAmount: number;
-    billingDate: string;
+    createdAt: string;
   }>;
-  paymentHistory: Array<{
+
+  // Financial Activity
+  financialActivity: Array<{
     paymentId: string;
+    displayId?: string;
+    date: string;
+    type: string;
     amount: number;
     paymentMethod: string;
-    paymentDate: string;
-    reference?: string;
+    reference: string;
+    notes: string;
+    verificationStatus: string;
   }>;
+
   statementGeneratedAt: string;
   personalizedTextMessage: string;
 }
@@ -43,17 +65,25 @@ export function generateShareStatement(params: {
   managerName?: string;
   managerPhone?: string;
 }): ShareStatementData {
-  const {
-    share,
-    fund,
-    cycles,
-    billings,
-    payments,
-    managerName = 'Operations Manager',
-    managerPhone = '',
-  } = params;
+  const { share, fund, cycles, billings, payments, managerName = 'Operations Manager', managerPhone = '' } = params;
 
-  // Filter billings for this share and fund
+  const fundCycles = cycles
+    .filter((c) => c.fundId === fund.fundId)
+    .sort((a, b) => a.cycleNumber - b.cycleNumber);
+
+  const highestCycleNum = fundCycles.length > 0 
+    ? Math.max(...fundCycles.map((c) => c.cycleNumber)) 
+    : null;
+
+  const fundTotalCycles = fund.totalCycles;
+  const totalCycles = typeof fundTotalCycles === 'number' && fundTotalCycles > 0 ? fundTotalCycles : null;
+
+  const cyclesCompleted = fundCycles.filter(c => c.isAuctionClosed).length;
+  const cyclesLeft = totalCycles !== null 
+    ? Math.max(0, totalCycles - cyclesCompleted) 
+    : null;
+
+  // Filter billings for this share
   const shareBillings = billings
     .filter((b) => b.shareId === share.shareId && b.fundId === fund.fundId)
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -61,66 +91,85 @@ export function generateShareStatement(params: {
   const billingHistory = shareBillings.map((b) => {
     const matchedCycle = cycles.find((c) => c.cycleId === b.cycleId);
     return {
+      billingId: b.billingId,
+      cycleId: b.cycleId,
       cycleNumber: matchedCycle ? matchedCycle.cycleNumber : 0,
+      cycleName: matchedCycle ? (matchedCycle.cycleName || `Cycle ${matchedCycle.cycleNumber}`) : 'Unknown',
       billAmount: b.billAmount,
-      billingDate: b.createdAt,
+      createdAt: b.createdAt,
     };
   });
 
-  // Filter payments for this share (payments are strictly share-level)
   const sharePayments = payments
     .filter((p) => p.shareId === share.shareId && p.fundId === fund.fundId)
     .sort((a, b) => new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime());
 
-  const paymentHistory = sharePayments.map((p) => ({
-    paymentId: p.displayId || p.paymentId,
+  const financialActivity = sharePayments.map((p) => ({
+    paymentId: p.paymentId,
+    displayId: p.displayId,
+    date: p.paymentDate,
+    type: p.type || 'CREDIT',
     amount: p.amount,
     paymentMethod: p.paymentMethod,
-    paymentDate: p.paymentDate,
-    reference: p.reference,
+    reference: p.reference || '',
+    notes: p.notes || '',
+    verificationStatus: p.verificationStatus,
   }));
 
-  const totalBilled = shareBillings.reduce((sum, b) => sum + b.billAmount, 0);
-  const totalPaid = sharePayments.reduce((sum, p) => sum + p.amount, 0);
+  // Stateful Reconciliation (Phase 2B.2)
+  const events: FinancialEvent[] = [
+    ...shareBillings.map(b => ({ type: 'BILLING' as const, amount: b.billAmount, timestamp: b.createdAt })),
+    ...sharePayments.map(p => ({ 
+      type: (p.type || 'CREDIT') as 'CREDIT' | 'DEBIT', 
+      amount: p.amount, 
+      timestamp: p.paymentDate 
+    }))
+  ];
 
-  const balance = FinancialEngine.resolveBalance(totalBilled, totalPaid);
-  const pendingAmount = balance.arrears;
-  const advanceAmount = balance.advance;
+  const rebuiltState = UniversalFinancialCore.rebuildState(events);
+  const pendingAmount = rebuiltState.arrears;
+  const advanceAmount = rebuiltState.advance;
 
-  let currentStatus = 'Up to date';
+  let currentStatusText = 'Up to date';
   if (pendingAmount > 0) {
-    currentStatus = `Pending ${FinancialEngine.formatCurrency(pendingAmount)}`;
+    currentStatusText = `Pending ₹${FinancialEngine.formatNumber(pendingAmount)}`;
   } else if (advanceAmount > 0) {
-    currentStatus = `Advance ${FinancialEngine.formatCurrency(advanceAmount)}`;
+    currentStatusText = `Advance ₹${FinancialEngine.formatNumber(advanceAmount)}`;
   }
 
   const shareDisplayId = share.displayId || `SH-${String(share.shareNumber).padStart(4, '0')}`;
-  const currentCycle = fund.currentMonth || null;
-  const totalCycles = fund.totalMonths > 0 ? fund.totalMonths : null;
+  const currentCycle = highestCycleNum;
   const statementGeneratedAt = new Date().toISOString();
 
-  const cycleProgress = totalCycles ? `${currentCycle || 1} / ${totalCycles}` : `${currentCycle || 1}`;
+  const statusSummaryText = currentStatusText;
 
-  const personalizedTextMessage = `Hello ${share.memberName},\n\nShare ID: ${shareDisplayId}\nMember: ${share.memberName}\nChitti: ${fund.fundName}\nManager: ${managerName}\n\nCurrent Status: ${currentStatus}\nCycle: ${cycleProgress}\n\nThank you for your continued association with us.`;
+  const cycleProgress = totalCycles ? `${cyclesCompleted} / ${totalCycles}` : `${cyclesCompleted}`;
+  const personalizedTextMessage = `Hello ${share.memberName},\n\nShare ID: ${shareDisplayId}\nFund: ${fund.fundName}\nStatus: ${currentStatusText}\nCycle: ${cycleProgress}\n\nThank you for your continued association with us.`;
 
   return {
     fundName: fund.fundName,
     fundStartDate: fund.startDate,
     shareDisplayId,
+    shareId: share.shareId,
     shareNumber: share.shareNumber,
     memberName: share.memberName,
     memberPhone: share.memberPhone,
     managerName,
     managerPhone,
+    cyclesCompleted,
     currentCycle,
     totalCycles,
-    currentStatus: pendingAmount > 0 ? 'Pending' : advanceAmount > 0 ? 'Advance' : 'Up to date',
+    cyclesLeft,
+    totalBilled: rebuiltState.totalBilled,
+    totalPaid: rebuiltState.totalCredits - rebuiltState.totalDebits,
+    totalCredits: rebuiltState.totalCredits,
+    totalDebits: rebuiltState.totalDebits,
     pendingAmount,
     advanceAmount,
-    totalBilled,
-    totalPaid,
+    currentStatus: pendingAmount > 0 ? 'Pending' : advanceAmount > 0 ? 'Advance' : 'Up to date',
+    statusSummaryText,
     billingHistory,
-    paymentHistory,
+    financialActivity,
     statementGeneratedAt,
     personalizedTextMessage,
   };
@@ -129,7 +178,7 @@ export function generateShareStatement(params: {
 export function buildWebhookStatementObject(data: ShareStatementData): WebhookStatement {
   return {
     available: true,
-    shareId: data.shareDisplayId,
+    shareId: data.shareId,
     memberName: data.memberName,
     fundName: data.fundName,
     managerName: data.managerName,

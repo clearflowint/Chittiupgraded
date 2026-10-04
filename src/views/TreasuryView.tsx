@@ -55,7 +55,7 @@ export const TreasuryView: React.FC<TreasuryViewProps> = ({ onOpenPaymentModal }
 
   // Materialized Total Inflows (Derived from Ledger / Shares state - zero need to download all historical payments)
   const chittiLedgerTotal = ledgers.find((l) => l.ledgerType === 'CHITTI_LEDGER')?.totalCollected;
-  const totalInflows = chittiLedgerTotal ?? shares.reduce((acc, s) => acc + (s.totalPaid || 0), 0);
+  const totalInflows = chittiLedgerTotal ?? shares.reduce((acc, s) => acc + ((s.totalCredits || 0) - (s.totalDebits || 0)), 0);
 
   // Total Outflows (Cycle winner payouts disbursed)
   const totalOutflows = cycles

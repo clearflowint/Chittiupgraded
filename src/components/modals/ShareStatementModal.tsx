@@ -160,7 +160,7 @@ export const ShareStatementModal: React.FC<ShareStatementModalProps> = ({
             <div className="space-y-1.5">
               <div className="flex items-center gap-1.5 text-slate-500 font-bold uppercase text-[10px] tracking-wider">
                 <Building2 className="w-3.5 h-3.5 text-slate-400" />
-                <span>Chitti Scheme &amp; Organization</span>
+                <span>Fund Scheme &amp; Organization</span>
               </div>
               <p className="font-extrabold text-slate-900 text-sm">{statement.fundName}</p>
               <p className="text-slate-600 font-medium">Operations Manager: <span className="font-bold text-slate-800">{statement.managerName}</span></p>
@@ -192,7 +192,7 @@ export const ShareStatementModal: React.FC<ShareStatementModalProps> = ({
               <span className="text-[10px] font-black uppercase text-sky-700 tracking-wider block">Cycle Progression</span>
               <span className="font-extrabold text-slate-900 text-sm font-mono-nums">
                 {statement.currentCycle !== null 
-                  ? (statement.totalCycles !== null ? `Month #${statement.currentCycle} of ${statement.totalCycles}` : `Month #${statement.currentCycle}`)
+                  ? (statement.totalCycles !== null ? `Cycle #${statement.currentCycle} of ${statement.totalCycles}` : `Cycle #${statement.currentCycle}`)
                   : 'Pre-Auction Period'}
               </span>
             </div>
@@ -210,7 +210,7 @@ export const ShareStatementModal: React.FC<ShareStatementModalProps> = ({
               <div className="text-center px-2 py-1 bg-white rounded-lg border border-sky-100">
                 <span className="text-[9px] uppercase font-bold text-slate-400 block">Prize Status</span>
                 <span className={`font-black ${isDrawn ? 'text-amber-700' : 'text-emerald-700'}`}>
-                  {isDrawn ? `Drawn (M${share.wonMonth || '?'})` : 'Undrawn'}
+                  {isDrawn ? `Drawn (Cycle #${share.wonCycleNumber || '?'})` : 'Undrawn'}
                 </span>
               </div>
             </div>
@@ -307,7 +307,7 @@ export const ShareStatementModal: React.FC<ShareStatementModalProps> = ({
                   <span>Date &amp; Receipt</span>
                   <span>Channel</span>
                   <span>Reference</span>
-                  <span className="text-right">Credit Amount</span>
+                  <span className="text-right">Amount</span>
                 </div>
                 {statement.financialActivity.map((p) => (
                   <div key={p.paymentId} className="px-3.5 py-2.5 grid grid-cols-4 items-center bg-white hover:bg-slate-50/50 transition">
@@ -324,8 +324,8 @@ export const ShareStatementModal: React.FC<ShareStatementModalProps> = ({
                       {p.reference}
                     </div>
                     <div className="text-right">
-                      <span className="font-black text-emerald-600 text-sm">
-                        +{FinancialEngine.formatCurrency(p.amount)}
+                      <span className={`font-black text-sm ${p.type === 'DEBIT' ? 'text-rose-600' : 'text-emerald-600'}`}>
+                        {p.type === 'DEBIT' ? '-' : '+'}{FinancialEngine.formatCurrency(p.amount)}
                       </span>
                     </div>
                   </div>

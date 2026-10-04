@@ -117,7 +117,9 @@ export const FundsDirectoryView: React.FC<FundsDirectoryViewProps> = ({
           {filteredFunds.map((f) => {
             const fundShares = shares.filter(s => s.fundId === f.fundId);
             const prizeClaimedCount = fundShares.filter(s => s.hasClaimedPrize).length;
-            const progress = Math.round((f.currentMonth / f.totalMonths) * 100);
+            const currentCycleVal = f.currentCycle ?? 1;
+            const totalCyclesVal = f.totalCycles ?? 12;
+            const progress = Math.round((currentCycleVal / totalCyclesVal) * 100);
 
             return (
               <div 
@@ -148,7 +150,7 @@ export const FundsDirectoryView: React.FC<FundsDirectoryViewProps> = ({
                     <div>
                       <span className="text-[10px] text-slate-400 uppercase block font-sans">Gross Installment</span>
                       <span className="font-semibold text-slate-700">
-                        {FinancialEngine.formatCurrency(Math.round(f.totalPool / f.totalMonths))}
+                        {FinancialEngine.formatCurrency(Math.round(f.totalPool / totalCyclesVal))}
                       </span>
                     </div>
                     <div>
@@ -165,7 +167,7 @@ export const FundsDirectoryView: React.FC<FundsDirectoryViewProps> = ({
                   <div className="mt-4 pt-3 border-t border-slate-100">
                     <div className="flex items-center justify-between text-xs text-slate-600 font-mono-nums mb-1">
                       <span>Cycle Progression</span>
-                      <span className="font-medium text-slate-900">Month {f.currentMonth} of {f.totalMonths} ({progress}%)</span>
+                      <span className="font-medium text-slate-900">Cycle {currentCycleVal} of {totalCyclesVal} ({progress}%)</span>
                     </div>
                     <div className="w-full bg-slate-100 h-1.5">
                       <div 
@@ -181,7 +183,7 @@ export const FundsDirectoryView: React.FC<FundsDirectoryViewProps> = ({
                   <button
                     onClick={() => {
                       setActiveFundId(f.fundId);
-                      onNavigate(`fund_cycles_${f.fundId}`);
+                      onNavigate(`funds/${f.fundId}/cycles`);
                     }}
                     className="flex-1 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 transition cursor-pointer flex items-center justify-center gap-1 font-mono-nums"
                   >
@@ -192,7 +194,7 @@ export const FundsDirectoryView: React.FC<FundsDirectoryViewProps> = ({
                   <button
                     onClick={() => {
                       setActiveFundId(f.fundId);
-                      onNavigate(`fund_ledger_${f.fundId}`);
+                      onNavigate(`funds/${f.fundId}/ledger`);
                     }}
                     className="flex-1 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 transition cursor-pointer flex items-center justify-center gap-1 font-mono-nums"
                   >
@@ -203,7 +205,7 @@ export const FundsDirectoryView: React.FC<FundsDirectoryViewProps> = ({
                   <button
                     onClick={() => {
                       setActiveFundId(f.fundId);
-                      onNavigate(`fund_${f.fundId}`);
+                      onNavigate(`funds/${f.fundId}`);
                     }}
                     className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 transition cursor-pointer flex items-center justify-center"
                     title="Fund Overview"

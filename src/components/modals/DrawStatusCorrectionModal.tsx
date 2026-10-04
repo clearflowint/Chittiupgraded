@@ -37,8 +37,8 @@ export const DrawStatusCorrectionModal: React.FC<DrawStatusCorrectionModalProps>
   const currentShare = shares.find((s) => s.shareId === selectedShareId) || shares[0];
 
   const [selectedMonth, setSelectedMonth] = useState<string>(
-    currentShare?.hasClaimedPrize && currentShare?.wonMonth
-      ? currentShare.wonMonth.toString()
+    currentShare?.hasClaimedPrize && currentShare?.wonCycleNumber
+      ? currentShare.wonCycleNumber.toString()
       : 'undrawn'
   );
 
@@ -120,7 +120,7 @@ export const DrawStatusCorrectionModal: React.FC<DrawStatusCorrectionModalProps>
             <span className="text-slate-600">{managerDisplay}</span>
           </div>
           <div>
-            <span className="font-semibold">Chitti ID: </span>
+            <span className="font-semibold">Fund ID: </span>
             <span className="text-slate-600">{fund.displayId || fund.fundId} ({fund.fundName})</span>
           </div>
           <div>
@@ -144,7 +144,7 @@ export const DrawStatusCorrectionModal: React.FC<DrawStatusCorrectionModalProps>
                 </span>
               </div>
               <p className="text-xs text-slate-500 leading-relaxed">
-                Select a month up to Active Month (M{fund.currentMonth}) to assign win status, or revoke draw status in case of wrong entry.
+                Select a cycle up to Active Cycle (Cycle #{fund.currentCycle}) to assign win status, or revoke draw status in case of wrong entry.
               </p>
             </div>
           )}
@@ -157,10 +157,10 @@ export const DrawStatusCorrectionModal: React.FC<DrawStatusCorrectionModalProps>
 
           <form onSubmit={handleSave} className="space-y-4">
             
-            {/* Winning Month Dropdown */}
+            {/* Winning Cycle Dropdown */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Winning Month (M1 to M{fund.currentMonth})
+                Winning Cycle (Cycle 1 to Cycle #{fund.currentCycle})
               </label>
               <select
                 value={selectedMonth}
@@ -168,9 +168,9 @@ export const DrawStatusCorrectionModal: React.FC<DrawStatusCorrectionModalProps>
                 className="w-full px-3.5 py-2.5 text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 min-h-[44px]"
               >
                 <option value="undrawn">-- Undrawn (No Win Yet) --</option>
-                {availableCycles.slice(0, fund.currentMonth).map((c) => (
+                {availableCycles.slice(0, fund.currentCycle).map((c) => (
                   <option key={c.cycleId} value={c.cycleNumber.toString()}>
-                    Month {c.cycleNumber} (M{c.cycleNumber})
+                    Cycle {c.cycleNumber}
                   </option>
                 ))}
               </select>
@@ -184,7 +184,7 @@ export const DrawStatusCorrectionModal: React.FC<DrawStatusCorrectionModalProps>
                   <span>Historical Change Detected</span>
                 </div>
                 <p className="text-xs leading-relaxed text-amber-800">
-                  Changing winner for Month {targetWonMonthNum || currentShare?.wonMonth} will trigger authoritative re-calculation across all affected subsequent cycles.
+                  Changing winner for Cycle #{targetWonMonthNum || currentShare?.wonCycleNumber} will trigger authoritative re-calculation across all affected subsequent cycles.
                 </p>
                 {impact.warnings.map((w, idx) => (
                   <div key={idx} className="text-xs font-mono-nums pl-2">· {w}</div>

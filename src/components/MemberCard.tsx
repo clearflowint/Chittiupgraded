@@ -43,9 +43,9 @@ export const MemberCard: React.FC<MemberCardProps> = ({
   onEditBills,
 }) => {
   const isDrawn = share.hasClaimedPrize;
-  const currentMonthDue = currentCycle
+  const currentCycleDue = currentCycle
     ? currentCycle.netInstallmentDue
-    : Math.round(fund.totalPool / fund.totalMonths);
+    : Math.round(fund.totalPool / fund.totalCycles);
 
   const shareDisplayId = share.displayId || '----';
   const fundDisplayId = fund.displayId || '----';
@@ -128,7 +128,7 @@ export const MemberCard: React.FC<MemberCardProps> = ({
         <div>
           <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1 font-sans">Current Due</span>
           <span className="font-black text-slate-900">
-            {FinancialEngine.formatCurrency(currentMonthDue)}/m
+            {FinancialEngine.formatCurrency(currentCycleDue)}
           </span>
         </div>
         <div>
@@ -139,14 +139,14 @@ export const MemberCard: React.FC<MemberCardProps> = ({
         </div>
         <div>
           <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1 font-sans">Cash Paid</span>
-          <span className={`font-black ${share.totalPaid > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
-            {FinancialEngine.formatCurrency(share.totalPaid)}
+          <span className={`font-black ${((share.totalCredits || 0) - (share.totalDebits || 0)) > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+            {FinancialEngine.formatCurrency((share.totalCredits || 0) - (share.totalDebits || 0))}
           </span>
         </div>
         <div>
-          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1 font-sans">Monthly Due Type</span>
+          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1 font-sans">Cycle Status</span>
           <span className="font-black text-slate-900 font-sans">
-            {isDrawn ? `Drawn (M${share.wonMonth})` : 'Undrawn (U)'}
+            {isDrawn ? `Drawn (C${share.wonCycleNumber ?? '?'})` : 'Undrawn (U)'}
           </span>
         </div>
       </div>

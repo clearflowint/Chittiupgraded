@@ -82,7 +82,7 @@ export interface DispatchCallbackPayload {
 }
 
 export interface WebhookRecipient {
-  memberId: string;
+  contactId: string;
   memberName: string;
   phone: string;
   shareId: string;
@@ -124,7 +124,7 @@ export interface WebhookOptions {
 }
 
 export interface WebhookBulkRecipient {
-  memberId: string;
+  contactId: string;
   memberName: string;
   phone: string;
   shareId: string;

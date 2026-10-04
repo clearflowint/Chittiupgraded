@@ -64,7 +64,7 @@ export const DeleteChittiModal: React.FC<DeleteChittiModalProps> = ({
               <span className="text-[10px] uppercase font-mono-nums tracking-widest text-rose-400 font-bold block">
                 DANGER ZONE · HIGH-RISK DESTRUCTION
               </span>
-              <h2 className="text-sm font-bold text-white">Delete Chitti Scheme</h2>
+              <h2 className="text-sm font-bold text-white">Delete Fund Scheme</h2>
             </div>
           </div>
           <button 
@@ -86,17 +86,17 @@ export const DeleteChittiModal: React.FC<DeleteChittiModalProps> = ({
           )}
 
           <p className="text-xs text-slate-600 leading-relaxed">
-            This action will permanently delete this Chitti scheme, all member allotments, all cycle records, and materialized ledger entries from your tenant account.
+            This action will permanently delete this Fund scheme, all member allotments, all cycle records, and materialized ledger entries from your tenant account.
           </p>
 
           {/* Scheme Impact Summary Table */}
           <div className="bg-rose-50/60 border border-rose-200 rounded-xl p-4 space-y-2 text-xs font-mono-nums">
             <div className="flex items-center justify-between">
-              <span className="text-slate-500 font-sans">Chitti Name:</span>
+              <span className="text-slate-500 font-sans">Fund Name:</span>
               <span className="font-bold text-slate-900">{fund.fundName}</span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500 font-sans">Chitti ID:</span>
+              <span className="text-slate-500 font-sans">Fund ID:</span>
               <span className="text-slate-700">{fund.fundId} ({fund.displayId || '----'})</span>
             </div>
             <div className="flex items-center justify-between">
@@ -141,7 +141,7 @@ export const DeleteChittiModal: React.FC<DeleteChittiModalProps> = ({
               className="px-5 py-2.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 disabled:opacity-40 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-xs min-h-[44px]"
             >
               <Trash2 className="w-4 h-4" />
-              <span>{loading ? 'Deleting...' : 'Delete Chitti Permanently'}</span>
+              <span>{loading ? 'Deleting...' : 'Delete Fund Permanently'}</span>
             </button>
           </div>
 

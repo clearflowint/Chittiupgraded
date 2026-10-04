@@ -1,6 +1,6 @@
 {
-  "name": "Manager Dashboard - Chitti & Financial Operations",
-  "description": "Production-grade multi-tenant chit fund, rotating savings, and financial operations SaaS platform with offline sync, PWA, and comprehensive ledger management.",
+  "name": "ClearFlow",
+  "description": "Next-generation financial operations platform for rotating savings, credit, and community finance management.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

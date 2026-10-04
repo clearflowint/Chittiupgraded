@@ -41,10 +41,13 @@ const parseRouteFromLocation = (): { route: string; fundId?: string; subTab?: st
     return { route: 'dashboard' };
   }
 
-  if (path.startsWith('funds/') || path.startsWith('fund_')) {
-    const cleanPath = path.startsWith('fund_') ? path.replace('fund_', 'funds/') : path;
-    const parts = cleanPath.split('/');
-    // e.g. funds/chit_001/ledger
+  if (path === 'crm') {
+    return { route: 'contacts' };
+  }
+
+  if (path.startsWith('funds/') || path.startsWith('fund/')) {
+    const parts = path.split('/');
+    // e.g. funds/chit_001/ledger or fund/chit_001/ledger
     const fundId = parts[1];
     const subTab = parts[2];
     if (fundId && fundId !== 'new') {
@@ -114,23 +117,6 @@ const MainAppContent: React.FC = () => {
             window.location.hash = `#/funds/${fundId}${subTab ? '/' + subTab : ''}`;
           }
         }
-      } else if (target.startsWith('fund_')) {
-        const clean = target.replace('fund_', '');
-        if (clean.startsWith('ledger_')) {
-          fundId = clean.replace('ledger_', '');
-          subTab = 'ledger';
-        } else if (clean.startsWith('cycles_')) {
-          fundId = clean.replace('cycles_', '');
-          subTab = 'cycles';
-        } else {
-          fundId = clean;
-          subTab = 'members';
-        }
-        route = 'fund_workspace';
-        if (fundId) {
-          setActiveFundId(fundId);
-          window.location.hash = `#/funds/${fundId}${subTab ? '/' + subTab : ''}`;
-        }
       } else {
         window.location.hash = `#/${target}`;
       }
@@ -195,9 +181,9 @@ const MainAppContent: React.FC = () => {
 
   // Active Fund Context
   const currentFund = activeFund;
-  const currentFundCycles = currentFund ? cycles.filter(c => c.fundId === currentFund.fundId) : [];
+  const currentFundCycles = currentFund ? cycles.filter(c => c.fundId === currentFund.fundId).sort((a, b) => a.cycleNumber - b.cycleNumber) : [];
   const currentFundShares = currentFund ? shares.filter(s => s.fundId === currentFund.fundId) : [];
-  const currentCycle = currentFundCycles.find(c => c.cycleNumber === currentFund?.currentMonth) || currentFundCycles[0];
+  const currentCycle = currentFundCycles.length > 0 ? currentFundCycles[currentFundCycles.length - 1] : null;
 
   const handleOpenPayment = (shareId?: string) => {
     setInitialPaymentShareId(shareId);
@@ -331,7 +317,7 @@ const MainAppContent: React.FC = () => {
           <TreasuryView onOpenPaymentModal={() => handleOpenPayment()} />
         )}
 
-        {currentTab === 'crm' && (
+        {currentTab === 'contacts' && (
           <CrmView />
         )}
 

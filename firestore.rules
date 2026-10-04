@@ -135,7 +135,7 @@ service cloud.firestore {
                     && request.resource.data.fundId == resource.data.fundId
                     && request.resource.data.cycleId == resource.data.cycleId
                     && request.resource.data.shareId == resource.data.shareId
-                    && request.resource.data.memberId == resource.data.memberId;
+                    && request.resource.data.contactId == resource.data.contactId;
       allow delete: if isTenantOwner(resource.data.managerId);
     }
 

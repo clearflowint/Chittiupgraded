@@ -26,7 +26,7 @@ export const FinalReportModal: React.FC<FinalReportModalProps> = ({
   const snapshot = fund.finalReportSnapshot;
 
   const totalBilled = snapshot?.totalBilled ?? fundShares.reduce((a, s) => a + s.totalBilled, 0);
-  const totalCollected = snapshot?.totalCollected ?? fundShares.reduce((a, s) => a + s.totalPaid, 0);
+  const totalCollected = snapshot?.totalCollected ?? fundShares.reduce((a, s) => a + ((s.totalCredits || 0) - (s.totalDebits || 0)), 0);
   const totalDisbursed = snapshot?.totalDisbursed ?? fundCycles.filter((c) => c.isAuctionClosed).reduce((a, c) => a + c.winnerNetPayout, 0);
   const totalCommission = snapshot?.totalCommission ?? fundCycles.filter((c) => c.isAuctionClosed).reduce((a, c) => a + c.organizerCommission, 0);
   const totalArrears = snapshot?.totalArrears ?? fundShares.reduce((a, s) => a + s.arrears, 0);
@@ -201,11 +201,11 @@ export const FinalReportModal: React.FC<FinalReportModalProps> = ({
                       <td className="py-2.5 px-3 font-sans font-medium text-slate-900">{s.memberName}</td>
                       <td className="py-2.5 px-3 font-sans">
                         <span className={`px-2 py-0.5 rounded-lg text-[9px] font-bold ${s.hasClaimedPrize ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}`}>
-                          {s.hasClaimedPrize ? `DRAWN M#${s.wonMonth}` : 'UNDRAWN'}
+                          {s.hasClaimedPrize ? `DRAWN C#${s.wonCycleNumber}` : 'UNDRAWN'}
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-right text-slate-900 font-medium">{FinancialEngine.formatCurrency(s.totalBilled)}</td>
-                      <td className="py-2.5 px-3 text-right text-emerald-700 font-bold">{FinancialEngine.formatCurrency(s.totalPaid)}</td>
+                      <td className="py-2.5 px-3 text-right text-emerald-700 font-bold">{FinancialEngine.formatCurrency((s.totalCredits || 0) - (s.totalDebits || 0))}</td>
                       <td className="py-2.5 px-3 text-right text-rose-600 font-bold">{FinancialEngine.formatCurrency(s.arrears)}</td>
                       <td className="py-2.5 px-3 text-right text-sky-600 font-bold">{FinancialEngine.formatCurrency(s.advance)}</td>
                     </tr>

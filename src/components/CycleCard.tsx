@@ -173,7 +173,7 @@ export const CycleCard: React.FC<CycleCardProps> = ({
             </div>
             <div className="mt-1 flex items-center gap-1.5">
               <p className="text-[14px] font-bold text-slate-500 truncate max-w-[120px]">
-                {cycle.cycleName || `Month #${cycle.cycleNumber}`}
+                {cycle.cycleName || `Cycle #${cycle.cycleNumber}`}
               </p>
               <span className="text-[12px] text-slate-300">·</span>
               <p className="text-[13px] font-mono-nums font-bold text-slate-400 uppercase tracking-tighter">

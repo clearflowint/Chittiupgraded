@@ -37,15 +37,16 @@ export const WhatsAppReminderModal: React.FC<WhatsAppReminderModalProps> = ({
   useEffect(() => {
     if (!isOpen || !fund) return;
 
-    const currentMonthNum = fund.currentMonth;
-    const dueInstallment = targetCycle?.netInstallmentDue || (fund.totalMonths > 0 ? Math.round(fund.totalPool / fund.totalMonths) : 0);
+    const fundCycles = cycles.filter(c => c.fundId === fund.fundId);
+    const currentCycleNum = targetCycle?.cycleNumber || (fundCycles.length > 0 ? Math.max(...fundCycles.map(c => c.cycleNumber)) : 1);
+    const dueInstallment = targetCycle?.netInstallmentDue || (fund.totalCycles > 0 ? Math.round(fund.totalPool / fund.totalCycles) : 0);
     const singleAmountDue = share ? Math.max(dueInstallment, share.arrears || dueInstallment) : dueInstallment;
 
     const defaultSingleMessage = share
-      ? `Dear ${share.memberName},\n\nThis is a friendly reminder from ${tenant?.name || 'Operations Manager'} for "${fund.fundName}" (Month #${currentMonthNum}).\n\nOutstanding Due: ${FinancialEngine.formatCurrency(singleAmountDue)}\nStatus: Share #${share.shareNumber} (${share.status.toUpperCase()})\n\nPlease remit via UPI or bank wire at your earliest convenience to maintain your scheme allocation.\n\nThank you!`
+      ? `Dear ${share.memberName},\n\nThis is a friendly reminder from ${tenant?.name || 'Operations Manager'} for "${fund.fundName}" (Cycle #${currentCycleNum}).\n\nOutstanding Due: ${FinancialEngine.formatCurrency(singleAmountDue)}\nStatus: Share #${share.shareNumber} (${share.status.toUpperCase()})\n\nPlease remit via UPI or bank wire at your earliest convenience to maintain your scheme allocation.\n\nThank you!`
       : '';
 
-    const defaultBroadcastMessage = `Dear Member,\n\nThis is an automated reminder from ${tenant?.name || 'Operations Manager'} for your chit installment in "${fund.fundName}" (Month #${currentMonthNum}).\n\nNet Installment Due: ${FinancialEngine.formatCurrency(dueInstallment)}\n\nPlease ensure payment before the cycle settlement date to participate in this month's dividend discount pool.\n\nThank you!`;
+    const defaultBroadcastMessage = `Dear Member,\n\nThis is an automated reminder from ${tenant?.name || 'Operations Manager'} for your chit installment in "${fund.fundName}" (Cycle #${currentCycleNum}).\n\nNet Installment Due: ${FinancialEngine.formatCurrency(dueInstallment)}\n\nPlease ensure payment before the cycle settlement date to participate in this cycle's dividend discount pool.\n\nThank you!`;
 
     setMessage(mode === 'single' ? defaultSingleMessage : defaultBroadcastMessage);
     setBroadcastDone(false);
@@ -53,16 +54,17 @@ export const WhatsAppReminderModal: React.FC<WhatsAppReminderModalProps> = ({
     setLoading(false);
     setProcessingState('idle');
     setAckTimestamp(null);
-  }, [isOpen, fund, share, targetCycle, mode, tenant?.name]);
+  }, [isOpen, fund, share, targetCycle, mode, tenant?.name, cycles]);
 
   if (!isOpen || !fund) return null;
 
-  const currentMonthNum = fund.currentMonth;
-  const dueInstallment = targetCycle?.netInstallmentDue || (fund.totalMonths > 0 ? Math.round(fund.totalPool / fund.totalMonths) : 0);
+  const fundCycles = cycles.filter(c => c.fundId === fund.fundId);
+  const currentCycleNum = targetCycle?.cycleNumber || (fundCycles.length > 0 ? Math.max(...fundCycles.map(c => c.cycleNumber)) : 1);
+  const dueInstallment = targetCycle?.netInstallmentDue || (fund.totalCycles > 0 ? Math.round(fund.totalPool / fund.totalCycles) : 0);
 
   // All pending members in THIS Chitti only (tenant + active fund scoped)
   const pendingShares = shares.filter(
-    (s) => s.fundId === fund.fundId && (s.arrears > 0 || (s.totalBilled > s.totalPaid))
+    (s) => s.fundId === fund.fundId && (s.arrears > 0 || (s.totalBilled > ((s.totalCredits || 0) - (s.totalDebits || 0))))
   );
 
   const handleCopy = () => {
@@ -214,7 +216,7 @@ export const WhatsAppReminderModal: React.FC<WhatsAppReminderModalProps> = ({
             
             <div className="flex items-center justify-between">
               <span className="text-slate-400 font-sans text-xs">Active Scheme:</span>
-              <span className="font-semibold text-white font-sans">{fund.fundName} (Month #{currentMonthNum})</span>
+              <span className="font-semibold text-white font-sans">{fund.fundName} (Cycle #{currentCycleNum})</span>
             </div>
 
             {mode === 'single' && share && (

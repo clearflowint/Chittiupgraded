@@ -22,10 +22,11 @@ interface TopBarProps {
 }
 
 export const TopBar: React.FC<TopBarProps> = ({ currentTab, onNavigate, onOpenNewFundModal }) => {
-  const { tenant, signOut } = useAuth();
+  const { tenant, signOut, hasPendingSyncs } = useAuth();
   const { activeFund } = useChitFund();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   useEffect(() => {
     const unsub = notificationService.subscribe((list) => {
@@ -40,6 +41,31 @@ export const TopBar: React.FC<TopBarProps> = ({ currentTab, onNavigate, onOpenNe
     setShowNotifications(!showNotifications);
     if (!showNotifications && unreadCount > 0) {
       notificationService.markAllAsRead();
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    
+    try {
+      const pendingCount = await hasPendingSyncs();
+      if (pendingCount > 0) {
+        const confirmLogout = window.confirm(
+          `Warning: You have ${pendingCount} unsynchronized offline changes. \n\nLogging out will preserve these changes, but they will not be replayed until you sign in again. \n\nContinue with logout?`
+        );
+        if (!confirmLogout) {
+          setIsLoggingOut(false);
+          return;
+        }
+      }
+      
+      const success = await signOut();
+      if (success) {
+        onNavigate('landing');
+      }
+    } finally {
+      setIsLoggingOut(false);
     }
   };
 
@@ -73,12 +99,12 @@ export const TopBar: React.FC<TopBarProps> = ({ currentTab, onNavigate, onOpenNe
                 Portfolio
               </button>
               <button
-                onClick={() => onNavigate('crm')}
+                onClick={() => onNavigate('contacts')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all cursor-pointer min-h-[36px] ${
-                  currentTab === 'crm' ? 'bg-sky-600 text-white shadow-md border border-sky-500' : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                  currentTab === 'contacts' ? 'bg-sky-600 text-white shadow-md border border-sky-500' : 'text-slate-300 hover:text-white hover:bg-slate-800'
                 }`}
               >
-                CRM
+                Contacts
               </button>
               <button
                 onClick={() => onNavigate('treasury')}
@@ -165,14 +191,12 @@ export const TopBar: React.FC<TopBarProps> = ({ currentTab, onNavigate, onOpenNe
 
               {/* Direct Visible Sign Out Text Button - Placed last (right) */}
               <button
-                onClick={() => {
-                  signOut();
-                  onNavigate('landing');
-                }}
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 border-rose-600 bg-rose-950/80 text-rose-300 hover:bg-rose-900 hover:text-white transition cursor-pointer min-h-[44px] text-xs font-black whitespace-nowrap shadow-md font-sans"
+                onClick={handleSignOut}
+                disabled={isLoggingOut}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 border-rose-600 bg-rose-950/80 text-rose-300 hover:bg-rose-900 hover:text-white transition cursor-pointer min-h-[44px] text-xs font-black whitespace-nowrap shadow-md font-sans disabled:opacity-50"
               >
                 <LogOut className="w-4 h-4 shrink-0" />
-                <span className="hidden md:inline">Sign Out</span>
+                <span className="hidden md:inline">{isLoggingOut ? 'Signing Out...' : 'Sign Out'}</span>
               </button>
             </>
           ) : (

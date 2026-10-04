@@ -39,7 +39,7 @@ export const DrawAssignmentBillingModal: React.FC<DrawAssignmentBillingModalProp
   [payouts, share.shareId]);
 
   const [drawStatus, setDrawStatus] = useState<'drawn' | 'undrawn'>(share.status === 'drawn' ? 'drawn' : 'undrawn');
-  const [selectedCycleNum, setSelectedCycleNum] = useState<number>(share.wonMonth || fund.currentMonth || 1);
+  const [selectedCycleNum, setSelectedCycleNum] = useState<number>(share.wonCycleNumber || fund.currentCycle || 1);
   const [payoutAmount, setPayoutAmount] = useState<number>(existingPayout?.amount || fund.totalPool);
   
   // billingChanges: map of cycleNumber -> new billAmount (empty means no change)
@@ -55,13 +55,13 @@ export const DrawAssignmentBillingModal: React.FC<DrawAssignmentBillingModalProp
   const affectedCycles = useMemo(() => {
     if (drawStatus === 'undrawn') {
       // If revoking, we show from the PREVIOUS draw cycle to latest
-      const startNum = share.wonMonth || 1;
+      const startNum = share.wonCycleNumber || 1;
       return fundCycles.filter(c => c.cycleNumber >= startNum && c.cycleNumber <= latestCycleNum);
     } else {
       // If assigning or reassigning, we show from the NEW selected draw cycle to latest
       return fundCycles.filter(c => c.cycleNumber >= selectedCycleNum && c.cycleNumber <= latestCycleNum);
     }
-  }, [drawStatus, selectedCycleNum, fundCycles, latestCycleNum, share.wonMonth]);
+  }, [drawStatus, selectedCycleNum, fundCycles, latestCycleNum, share.wonCycleNumber]);
 
   // Sync billing changes state (reset overrides when window or share changes)
   useEffect(() => {
@@ -74,10 +74,10 @@ export const DrawAssignmentBillingModal: React.FC<DrawAssignmentBillingModalProp
   useEffect(() => {
     if (isOpen) {
       setDrawStatus(share.status === 'drawn' ? 'drawn' : 'undrawn');
-      setSelectedCycleNum(share.wonMonth || fund.currentMonth || 1);
+      setSelectedCycleNum(share.wonCycleNumber || fund.currentCycle || 1);
       setPayoutAmount(existingPayout?.amount || fund.totalPool);
     }
-  }, [isOpen, share, existingPayout, fund.currentMonth]);
+  }, [isOpen, share, existingPayout, fund.currentCycle]);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,8 +95,8 @@ export const DrawAssignmentBillingModal: React.FC<DrawAssignmentBillingModalProp
         ? fundCycles.find(c => c.cycleNumber === selectedCycleNum)
         : null;
 
-      const previousDrawCycle = share.wonMonth 
-        ? fundCycles.find(c => c.cycleNumber === share.wonMonth)
+      const previousDrawCycle = share.wonCycleNumber 
+        ? fundCycles.find(c => c.cycleNumber === share.wonCycleNumber)
         : null;
 
       // Filter and convert billingChanges to numeric overrides
@@ -161,7 +161,7 @@ export const DrawAssignmentBillingModal: React.FC<DrawAssignmentBillingModalProp
             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border uppercase ${
               share.status === 'drawn' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-teal-50 text-teal-700 border-teal-200'
             }`}>
-              {share.status === 'drawn' ? `Drawn (M${share.wonMonth})` : 'Undrawn'}
+              {share.status === 'drawn' ? `Drawn (Cycle #${share.wonCycleNumber})` : 'Undrawn'}
             </span>
           </div>
         </div>
@@ -194,7 +194,7 @@ export const DrawAssignmentBillingModal: React.FC<DrawAssignmentBillingModalProp
               <>
                 <div>
                   <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
-                    Draw Cycle (Month #)
+                    Draw Cycle (#)
                   </label>
                   <select
                     value={selectedCycleNum}
@@ -203,7 +203,7 @@ export const DrawAssignmentBillingModal: React.FC<DrawAssignmentBillingModalProp
                   >
                     {fundCycles.map(c => (
                       <option key={c.cycleId} value={c.cycleNumber}>
-                        Cycle #{c.cycleNumber} {c.cycleNumber === fund.currentMonth ? '(Active)' : ''}
+                        Cycle #{c.cycleNumber} {c.cycleNumber === fund.currentCycle ? '(Active)' : ''}
                       </option>
                     ))}
                   </select>
@@ -310,7 +310,7 @@ export const DrawAssignmentBillingModal: React.FC<DrawAssignmentBillingModalProp
               <div>
                 <span className="text-slate-400 block font-sans text-[9px] uppercase tracking-wider mb-0.5">Final Status</span>
                 <span className="font-bold uppercase tracking-tight">
-                  {drawStatus === 'drawn' ? `Drawn (Month #${selectedCycleNum})` : 'Undrawn / Revoked'}
+                  {drawStatus === 'drawn' ? `Drawn (Cycle #${selectedCycleNum})` : 'Undrawn / Revoked'}
                 </span>
               </div>
               <div>

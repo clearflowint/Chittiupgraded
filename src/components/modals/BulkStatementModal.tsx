@@ -141,7 +141,7 @@ export const BulkStatementModal: React.FC<BulkStatementModalProps> = ({
         <div className="p-5 sm:p-6 space-y-4 text-slate-800 text-xs overflow-y-auto">
           
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
-            <span className="text-[10px] uppercase font-bold text-slate-400 block">Target Chitti Workspace</span>
+            <span className="text-[10px] uppercase font-bold text-slate-400 block">Target Fund Workspace</span>
             <p className="font-extrabold text-slate-900 text-sm">{fund.fundName}</p>
             <p className="text-slate-500 text-[11px]">Operations Manager: <strong className="text-slate-700">{managerName}</strong></p>
           </div>

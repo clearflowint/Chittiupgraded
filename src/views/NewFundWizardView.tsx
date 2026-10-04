@@ -19,7 +19,7 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
 
   const handleFinish = async () => {
     if (!fundName.trim()) {
-      setError('Please enter a valid Chitti / Scheme Name.');
+      setError('Please enter a valid Fund / Scheme Name.');
       return;
     }
     setLoading(true);
@@ -33,14 +33,13 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
         memberList: [], // Start with 0 members
         totalPool: 0,   // Managed dynamically
         numberOfShares: 0, // Managed dynamically
-        totalMonths: 12, // Default metadata
         commissionPercent: 5, // Default metadata
         totalCycles: totalCycles.trim() ? parseInt(totalCycles, 10) : null,
       });
       setActiveFundId(fundId);
-      onNavigate(`fund_${fundId}`);
+      onNavigate(`funds/${fundId}`);
     } catch (err: any) {
-      setError(err?.message || 'Failed to create Chitti scheme.');
+      setError(err?.message || 'Failed to create Fund scheme.');
       setLoading(false);
     }
   };
@@ -54,10 +53,10 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
           IDENTITY-ONLY WORKFLOW
         </span>
         <h1 className="text-2xl sm:text-3xl font-serif font-bold text-slate-950">
-          Start Managing Chitti
+          Start Managing Fund
         </h1>
         <p className="text-xs text-slate-500 mt-1">
-          Establish the identity of your new Chitti scheme. Members and billing cycles are created dynamically as you operate.
+          Establish the identity of your new Fund scheme. Members and billing cycles are created dynamically as you operate.
         </p>
       </div>
 
@@ -72,12 +71,12 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
       <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-xs">
         <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
           <Layers className="w-4 h-4 text-emerald-700" />
-          <span>Chitti Scheme Specifications</span>
+          <span>Fund Scheme Specifications</span>
         </h2>
 
         <div>
           <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wide">
-            Chitti / Scheme Name *
+            Fund / Scheme Name *
           </label>
           <input
             type="text"
@@ -85,7 +84,7 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
             value={fundName}
             onChange={(e) => setFundName(e.target.value)}
             className="mt-1.5 w-full px-3.5 py-2.5 text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-medium transition"
-            placeholder="e.g. Apex Series, Gold Star Chitti"
+            placeholder="e.g. Apex Series, Gold Star Fund"
           />
         </div>
 
@@ -136,7 +135,7 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
       </div>
 
       <div className="p-4 bg-emerald-50 border border-emerald-200 text-xs text-emerald-950 rounded-xl leading-relaxed">
-        <strong>Dynamic Initialization Principle:</strong> This action establishes the Chitti record immediately with zero pre-loaded members and cycles. You can add member shares and start billing whenever you are ready.
+        <strong>Dynamic Initialization Principle:</strong> This action establishes the Fund record immediately with zero pre-loaded members and cycles. You can add member shares and start billing whenever you are ready.
       </div>
 
       {/* Navigation and Launch Actions */}
@@ -155,7 +154,7 @@ export const NewFundWizardView: React.FC<NewFundWizardViewProps> = ({ onNavigate
           onClick={handleFinish}
           className="px-6 py-2.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-sm"
         >
-          {loading ? 'Launching Scheme...' : 'Launch Chitti'}
+          {loading ? 'Launching Scheme...' : 'Launch Fund'}
           <CheckCircle2 className="w-3.5 h-3.5" />
         </button>
       </div>

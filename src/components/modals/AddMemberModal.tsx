@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useChitFund } from '../../context/ChitFundContext';
 import { Fund } from '../../types';
+import { normalizePhoneNumber, isValidPhoneNumber } from '../../utils/phone';
 import { X, UserPlus, AlertCircle, Search } from 'lucide-react';
 
 interface AddMemberModalProps {
@@ -10,7 +11,7 @@ interface AddMemberModalProps {
 }
 
 export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose, fund }) => {
-  const { addShare, contacts, showAcknowledgement } = useChitFund();
+  const { addShare, contacts, shares, showAcknowledgement } = useChitFund();
 
   const [memberName, setMemberName] = useState('');
   const [memberPhone, setMemberPhone] = useState('');
@@ -20,6 +21,39 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
 
   const [contactSearch, setContactSearch] = useState('');
   const [showContactResults, setShowContactSearch] = useState(false);
+
+  // Reset all modal state whenever the modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setContactSearch('');
+      setShowContactSearch(false);
+      setMemberName('');
+      setMemberPhone('');
+      setSelectedContactId('');
+      setError(null);
+    }
+  }, [isOpen]);
+
+  // Evaluated ONLY against the currently active Fund (fund.fundId)
+  const isAlreadyMemberInCurrentFund = useMemo(() => {
+    if (!fund?.fundId || !shares || shares.length === 0) return false;
+
+    // Check if selected CRM contact or entered phone already holds a Share in THIS active Fund ONLY
+    if (selectedContactId) {
+      return shares.some(s => s.fundId === fund.fundId && s.contactId === selectedContactId);
+    }
+
+    if (memberPhone && isValidPhoneNumber(memberPhone)) {
+      const normInputPhone = normalizePhoneNumber(memberPhone);
+      return shares.some(s => 
+        s.fundId === fund.fundId && 
+        s.memberPhone && 
+        normalizePhoneNumber(s.memberPhone) === normInputPhone
+      );
+    }
+
+    return false;
+  }, [fund?.fundId, selectedContactId, memberPhone, shares]);
 
   if (!isOpen) return null;
 
@@ -45,8 +79,8 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
       return;
     }
 
-    if (memberPhone.length !== 10) {
-      setError('Phone number must be exactly 10 digits.');
+    if (!isValidPhoneNumber(memberPhone)) {
+      setError('Phone number must be exactly 10 valid digits.');
       return;
     }
 
@@ -55,7 +89,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
 
     try {
       const finalName = memberName.trim();
-      const finalPhone = `+91${memberPhone}`;
+      const finalPhone = normalizePhoneNumber(memberPhone);
       const shareId = await addShare({
         fundId: fund.fundId,
         memberName: finalName,
@@ -72,7 +106,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
       showAcknowledgement({
         isSuccess: true,
         title: 'Member Allotted Successfully',
-        message: `Successfully registered member "${finalName}" to the Chitti scheme.`,
+        message: `Successfully registered member "${finalName}" to the Fund scheme.`,
         operationType: 'ADD MEMBER ALLOTMENT',
         referenceId: shareId || `REF-${Date.now().toString().slice(-6)}`,
         ackTime: new Date().toLocaleTimeString(),
@@ -237,6 +271,19 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
               <span className="text-[10px] text-slate-400 mt-1.5 ml-1 block font-medium">Exactly 10 digits required for WhatsApp automation</span>
             </div>
 
+            {/* Current-Fund Existing Member Warning Banner */}
+            {isAlreadyMemberInCurrentFund && (
+              <div className="p-3 bg-amber-50 border border-amber-200/90 text-amber-900 text-xs rounded-xl space-y-1 font-sans animate-in fade-in">
+                <div className="flex items-center gap-1.5 font-bold text-amber-800">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>⚠ Already a Member</span>
+                </div>
+                <p className="text-[11px] text-amber-700 leading-relaxed pl-5.5">
+                  This contact already has an existing share in this Fund. You can still allot another share.
+                </p>
+              </div>
+            )}
+
             {/* Action buttons */}
             <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100">
               <button
@@ -248,8 +295,8 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({ isOpen, onClose,
               </button>
               <button
                 type="submit"
-                disabled={loading}
-                className="py-3 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-50 transition cursor-pointer shadow-md min-h-[48px]"
+                disabled={loading || !memberName.trim() || !isValidPhoneNumber(memberPhone)}
+                className="py-3 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer shadow-md min-h-[48px]"
               >
                 {loading ? 'Allotting...' : 'Allot Share'}
               </button>

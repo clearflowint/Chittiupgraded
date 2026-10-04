@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useChitFund } from '../../context/ChitFundContext';
 import { Fund, Share } from '../../types';
+import { normalizePhoneNumber, isValidPhoneNumber } from '../../utils/phone';
 import { X, Edit3, User, Phone, AlertCircle, Search } from 'lucide-react';
 
 interface EditMemberModalProps {
@@ -70,8 +71,8 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       setError('Member name is required.');
       return;
     }
-    if (memberPhone.length !== 10) {
-      setError('Phone number must be exactly 10 digits.');
+    if (!isValidPhoneNumber(memberPhone)) {
+      setError('Phone number must be exactly 10 valid digits.');
       return;
     }
 
@@ -79,7 +80,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     setError(null);
 
     try {
-      const fullPhone = `+91${memberPhone.trim()}`;
+      const fullPhone = normalizePhoneNumber(memberPhone);
       await updateShare({
         fundId: fund.fundId,
         shareId: share.shareId,
@@ -138,7 +139,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
             <span className="text-slate-600">{managerDisplay}</span>
           </div>
           <div>
-            <span className="font-semibold">Chitti ID: </span>
+            <span className="font-semibold">Fund ID: </span>
             <span className="text-slate-600">{fund.displayId || fund.fundId} ({fund.fundName})</span>
           </div>
           <div>
@@ -286,8 +287,8 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={loading}
-                className="py-2.5 rounded-xl text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-50 transition cursor-pointer shadow-xs min-h-[44px]"
+                disabled={loading || !memberName.trim() || !isValidPhoneNumber(memberPhone)}
+                className="py-2.5 rounded-xl text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer shadow-xs min-h-[44px]"
               >
                 {loading ? 'Saving...' : 'Save Changes'}
               </button>

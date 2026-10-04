@@ -299,7 +299,7 @@ export class CommunicationDispatcher {
       fund: { fundId: fund.fundId, fundName: fund.fundName },
       manager: { managerId, managerName, phone: managerPhone, email: managerEmail },
       recipient: {
-        memberId: share.memberId,
+        contactId: share.contactId,
         memberName: share.memberName,
         phone: normalizedPhone,
         shareId: statementData.shareDisplayId,
@@ -307,7 +307,7 @@ export class CommunicationDispatcher {
       communication: {
         channel,
         message,
-        subject: `Chitti Reminder: ${fund.fundName}`,
+        subject: `Fund Reminder: ${fund.fundName}`,
         mediaUrl: '',
         documentUrl: '',
       },
@@ -380,8 +380,9 @@ export class CommunicationDispatcher {
     const eligibleRecipients: WebhookBulkRecipient[] = [];
     let skippedCount = 0;
 
-    const currentMonthNum = fund.currentMonth;
-    const dueInstallment = fund.totalMonths > 0 ? Math.round(fund.totalPool / fund.totalMonths) : 0;
+    const currentCycleNum = fund.currentCycle ?? 1;
+    const totalCyclesCount = fund.totalCycles ?? 12;
+    const dueInstallment = totalCyclesCount > 0 ? Math.round(fund.totalPool / totalCyclesCount) : 0;
 
     for (const share of fundShares) {
       if (!isUsablePhone(share.memberPhone)) {
@@ -392,12 +393,12 @@ export class CommunicationDispatcher {
       const singleAmountDue = Math.max(dueInstallment, share.arrears || dueInstallment);
       const shareMessage = customMessage
         ? customMessage
-        : `Dear ${share.memberName},\n\nThis is a friendly reminder from ${managerName} for "${fund.fundName}" (Month #${currentMonthNum}).\n\nOutstanding Due: ${FinancialEngine.formatCurrency(singleAmountDue)}\nStatus: Share #${share.shareNumber} (${share.status.toUpperCase()})\n\nPlease remit via UPI or bank wire at your earliest convenience to maintain your scheme allocation.\n\nThank you!`;
+        : `Dear ${share.memberName},\n\nThis is a friendly reminder from ${managerName} for "${fund.fundName}" (Cycle #${currentCycleNum}).\n\nOutstanding Due: ${FinancialEngine.formatCurrency(singleAmountDue)}\nStatus: Share #${share.shareNumber} (${share.status.toUpperCase()})\n\nPlease remit via UPI or bank wire at your earliest convenience to maintain your scheme allocation.\n\nThank you!`;
 
       const normalizedPhone = normalizeRecipientPhone(share.memberPhone);
 
       eligibleRecipients.push({
-        memberId: share.memberId,
+        contactId: share.contactId,
         memberName: share.memberName,
         phone: normalizedPhone,
         shareId: share.displayId || share.shareId,
@@ -420,7 +421,7 @@ export class CommunicationDispatcher {
       fund: { fundId: fund.fundId, fundName: fund.fundName },
       manager: { managerId, managerName, phone: managerPhone, email: managerEmail },
       recipient: {
-        memberId: '',
+        contactId: '',
         memberName: '',
         phone: '',
         shareId: '',
@@ -428,7 +429,7 @@ export class CommunicationDispatcher {
       communication: {
         channel,
         message: customMessage || `Bulk Reminders for ${fund.fundName} (${eligibleRecipients.length} recipients)`,
-        subject: `Chitti Reminder: ${fund.fundName}`,
+        subject: `Fund Reminder: ${fund.fundName}`,
         mediaUrl: '',
         documentUrl: '',
       },
@@ -544,7 +545,7 @@ export class CommunicationDispatcher {
       fund: { fundId: fund.fundId, fundName: fund.fundName },
       manager: { managerId, managerName, phone: managerPhone, email: managerEmail },
       recipient: {
-        memberId: share.memberId,
+        contactId: share.contactId,
         memberName: share.memberName,
         phone: normalizedPhone,
         shareId: statementData.shareDisplayId,
@@ -648,7 +649,7 @@ export class CommunicationDispatcher {
       const normalizedPhone = normalizeRecipientPhone(share.memberPhone);
 
       eligibleRecipients.push({
-        memberId: share.memberId,
+        contactId: share.contactId,
         memberName: share.memberName,
         phone: normalizedPhone,
         shareId: statementData.shareDisplayId,
@@ -672,7 +673,7 @@ export class CommunicationDispatcher {
       fund: { fundId: fund.fundId, fundName: fund.fundName },
       manager: { managerId, managerName, phone: managerPhone, email: managerEmail },
       recipient: {
-        memberId: '',
+        contactId: '',
         memberName: '',
         phone: '',
         shareId: '',
@@ -680,7 +681,7 @@ export class CommunicationDispatcher {
       communication: {
         channel,
         message: `Bulk Account Statements for ${fund.fundName} (${eligibleRecipients.length} recipients)`,
-        subject: `Monthly Statements - ${fund.fundName}`,
+        subject: `Cycle Statements - ${fund.fundName}`,
         mediaUrl: '',
         documentUrl: '',
       },
@@ -787,7 +788,7 @@ export class CommunicationDispatcher {
       fund: { fundId, fundName },
       manager: { managerId, managerName, phone: managerPhone, email: managerEmail },
       recipient: {
-        memberId: '',
+        contactId: '',
         memberName: '',
         phone: '',
         shareId: '',
@@ -854,7 +855,7 @@ export class CommunicationDispatcher {
    * Suitable for direct pasting into n8n webhook test nodes.
    */
   static getSamplePayload(event: CommunicationEvent): CommunicationWebhookPayload {
-    const now = '2026-10-03T08:30:00.000Z';
+    const now = new Date().toISOString();
 
     switch (event) {
       case 'share_reminder':
@@ -863,28 +864,28 @@ export class CommunicationDispatcher {
           batchId: 'rem_batch_1791192800_x4a9k',
           dispatchId: 'DSP_1791192800_w8b2m',
           timestamp: now,
-          tenant: { tenantId: 'tenant_cf_demo_8812' },
-          fund: { fundId: 'fund_apex_wealth_01', fundName: 'Apex Wealth Scheme' },
-          manager: { managerId: 'mgr_ravi_kumar', managerName: 'Ravi Kumar', phone: '+919876543210', email: 'ravi.kumar@apexwealth.internal' },
+          tenant: { tenantId: 'tenant_workspace_01' },
+          fund: { fundId: 'fund_01', fundName: 'Financial Scheme' },
+          manager: { managerId: 'mgr_01', managerName: 'Operations Manager', phone: '+910000000000', email: 'manager@clearflow.internal' },
           recipient: {
-            memberId: 'mem_mahesh_k',
-            memberName: 'Mahesh Kumar',
-            phone: '+919845010011',
+            contactId: '+910000000000',
+            memberName: 'Member Name',
+            phone: '+910000000000',
             shareId: 'SH-0104',
           },
           communication: {
             channel: 'whatsapp',
-            message: 'Hello Mahesh,\n\nShare ID: SH-0104\nMember: Mahesh Kumar\nChitti: Apex Wealth Scheme\nManager: Ravi Kumar\n\nCurrent Status: Pending ₹5,000\nCycle: 8 / 12\n\nThank you for your continued association with us.',
-            subject: 'Chitti Reminder: Apex Wealth Scheme',
+            message: 'Hello Member Name,\n\nShare ID: SH-0104\nMember: Member Name\nFund: Financial Scheme\nManager: Operations Manager\n\nCurrent Status: Pending ₹5,000\nCycle: 8 / 12\n\nThank you for your continued association with us.',
+            subject: 'Fund Reminder: Financial Scheme',
             mediaUrl: '',
             documentUrl: '',
           },
           statement: {
             available: true,
             shareId: 'SH-0104',
-            memberName: 'Mahesh Kumar',
-            fundName: 'Apex Wealth Scheme',
-            managerName: 'Ravi Kumar',
+            memberName: 'Member Name',
+            fundName: 'Financial Scheme',
+            managerName: 'Operations Manager',
             currentStatus: 'Pending',
             pendingAmount: 5000,
             advanceAmount: 0,
@@ -908,22 +909,22 @@ export class CommunicationDispatcher {
       case 'bulk_reminder':
         return {
           event: 'bulk_reminder',
-          batchId: 'bulk_rem_fund_apex_wealth_01_1791192800',
+          batchId: 'bulk_rem_fund_01_1791192800',
           dispatchId: 'DSP_1791192800_b9m4k',
           timestamp: now,
-          tenant: { tenantId: 'tenant_cf_demo_8812' },
-          fund: { fundId: 'fund_apex_wealth_01', fundName: 'Apex Wealth Scheme' },
-          manager: { managerId: 'mgr_ravi_kumar', managerName: 'Ravi Kumar', phone: '+919876543210', email: 'ravi.kumar@apexwealth.internal' },
+          tenant: { tenantId: 'tenant_workspace_01' },
+          fund: { fundId: 'fund_01', fundName: 'Financial Scheme' },
+          manager: { managerId: 'mgr_01', managerName: 'Operations Manager', phone: '+910000000000', email: 'manager@clearflow.internal' },
           recipient: {
-            memberId: '',
+            contactId: '',
             memberName: '',
             phone: '',
             shareId: '',
           },
           communication: {
             channel: 'whatsapp',
-            message: 'Bulk Reminders for Apex Wealth Scheme (2 recipients)',
-            subject: 'Chitti Reminder: Apex Wealth Scheme',
+            message: 'Bulk Reminders for Financial Scheme (2 recipients)',
+            subject: 'Fund Reminder: Financial Scheme',
             mediaUrl: '',
             documentUrl: '',
           },
@@ -931,8 +932,8 @@ export class CommunicationDispatcher {
             available: false,
             shareId: '',
             memberName: '',
-            fundName: 'Apex Wealth Scheme',
-            managerName: 'Ravi Kumar',
+            fundName: 'Financial Scheme',
+            managerName: 'Operations Manager',
             currentStatus: '',
             pendingAmount: 0,
             advanceAmount: 0,
@@ -943,7 +944,7 @@ export class CommunicationDispatcher {
           campaign: {
             campaignId: '',
             targetType: 'PENDING_MEMBERS',
-            targetId: 'fund_apex_wealth_01',
+            targetId: 'fund_01',
             channels: ['whatsapp'],
           },
           options: {
@@ -953,22 +954,22 @@ export class CommunicationDispatcher {
           },
           recipients: [
             {
-              memberId: 'mem_mahesh_k',
-              memberName: 'Mahesh Kumar',
-              phone: '+919845010011',
+              contactId: '+910000000000',
+              memberName: 'Member Name',
+              phone: '+910000000000',
               shareId: 'SH-0104',
-              fundId: 'fund_apex_wealth_01',
-              fundName: 'Apex Wealth Scheme',
-              message: 'Dear Mahesh Kumar,\n\nThis is a friendly reminder from Ravi Kumar for "Apex Wealth Scheme" (Month #8).\n\nOutstanding Due: ₹5,000\nStatus: Share #4 (ACTIVE)\n\nPlease remit via UPI or bank wire at your earliest convenience to maintain your scheme allocation.\n\nThank you!',
+              fundId: 'fund_01',
+              fundName: 'Financial Scheme',
+              message: 'Dear Member Name,\n\nThis is a friendly reminder from Operations Manager for "Financial Scheme" (Cycle #8).\n\nOutstanding Due: ₹5,000\nStatus: Share #4 (ACTIVE)\n\nPlease remit via UPI or bank wire at your earliest convenience to maintain your scheme allocation.\n\nThank you!',
             },
             {
-              memberId: 'mem_priya_s',
-              memberName: 'Priya Sharma',
-              phone: '+919845020022',
+              contactId: '+910000000001',
+              memberName: 'Member 2',
+              phone: '+910000000001',
               shareId: 'SH-0105',
-              fundId: 'fund_apex_wealth_01',
-              fundName: 'Apex Wealth Scheme',
-              message: 'Dear Priya Sharma,\n\nThis is a friendly reminder from Ravi Kumar for "Apex Wealth Scheme" (Month #8).\n\nOutstanding Due: ₹5,000\nStatus: Share #5 (ACTIVE)\n\nPlease remit via UPI or bank wire at your earliest convenience to maintain your scheme allocation.\n\nThank you!',
+              fundId: 'fund_01',
+              fundName: 'Financial Scheme',
+              message: 'Dear Member 2,\n\nThis is a friendly reminder from Operations Manager for "Financial Scheme" (Cycle #8).\n\nOutstanding Due: ₹5,000\nStatus: Share #5 (ACTIVE)\n\nPlease remit via UPI or bank wire at your earliest convenience to maintain your scheme allocation.\n\nThank you!',
             },
           ],
         };
@@ -979,28 +980,28 @@ export class CommunicationDispatcher {
           batchId: 'stmt_batch_1791192800_k7n2z',
           dispatchId: 'DSP_1791192800_p4q9y',
           timestamp: now,
-          tenant: { tenantId: 'tenant_cf_demo_8812' },
-          fund: { fundId: 'fund_apex_wealth_01', fundName: 'Apex Wealth Scheme' },
-          manager: { managerId: 'mgr_ravi_kumar', managerName: 'Ravi Kumar', phone: '+919876543210', email: 'ravi.kumar@apexwealth.internal' },
+          tenant: { tenantId: 'tenant_workspace_01' },
+          fund: { fundId: 'fund_01', fundName: 'Financial Scheme' },
+          manager: { managerId: 'mgr_01', managerName: 'Operations Manager', phone: '+910000000000', email: 'manager@clearflow.internal' },
           recipient: {
-            memberId: 'mem_mahesh_k',
-            memberName: 'Mahesh Kumar',
-            phone: '+919845010011',
+            contactId: '+910000000000',
+            memberName: 'Member Name',
+            phone: '+910000000000',
             shareId: 'SH-0104',
           },
           communication: {
             channel: 'whatsapp',
-            message: 'Hello Mahesh,\n\nShare ID: SH-0104\nMember: Mahesh Kumar\nChitti: Apex Wealth Scheme\nManager: Ravi Kumar\n\nCurrent Status: Pending ₹5,000\nCycle: 8 / 12\n\nThank you for your continued association with us.',
-            subject: 'Account Statement: Apex Wealth Scheme',
+            message: 'Hello Member Name,\n\nShare ID: SH-0104\nMember: Member Name\nFund: Financial Scheme\nManager: Operations Manager\n\nCurrent Status: Pending ₹5,000\nCycle: 8 / 12\n\nThank you for your continued association with us.',
+            subject: 'Account Statement: Financial Scheme',
             mediaUrl: '',
             documentUrl: '',
           },
           statement: {
             available: true,
             shareId: 'SH-0104',
-            memberName: 'Mahesh Kumar',
-            fundName: 'Apex Wealth Scheme',
-            managerName: 'Ravi Kumar',
+            memberName: 'Member Name',
+            fundName: 'Financial Scheme',
+            managerName: 'Operations Manager',
             currentStatus: 'Pending',
             pendingAmount: 5000,
             advanceAmount: 0,
@@ -1024,22 +1025,22 @@ export class CommunicationDispatcher {
       case 'bulk_statement':
         return {
           event: 'bulk_statement',
-          batchId: 'bulk_stmt_fund_apex_wealth_01_1791192800',
+          batchId: 'bulk_stmt_fund_01_1791192800',
           dispatchId: 'DSP_1791192800_r1t5e',
           timestamp: now,
-          tenant: { tenantId: 'tenant_cf_demo_8812' },
-          fund: { fundId: 'fund_apex_wealth_01', fundName: 'Apex Wealth Scheme' },
-          manager: { managerId: 'mgr_ravi_kumar', managerName: 'Ravi Kumar', phone: '+919876543210', email: 'ravi.kumar@apexwealth.internal' },
+          tenant: { tenantId: 'tenant_workspace_01' },
+          fund: { fundId: 'fund_01', fundName: 'Financial Scheme' },
+          manager: { managerId: 'mgr_01', managerName: 'Operations Manager', phone: '+910000000000', email: 'manager@clearflow.internal' },
           recipient: {
-            memberId: '',
+            contactId: '',
             memberName: '',
             phone: '',
             shareId: '',
           },
           communication: {
             channel: 'whatsapp',
-            message: 'Bulk Account Statements for Apex Wealth Scheme (2 recipients)',
-            subject: 'Monthly Statements - Apex Wealth Scheme',
+            message: 'Bulk Account Statements for Financial Scheme (2 recipients)',
+            subject: 'Cycle Statements - Financial Scheme',
             mediaUrl: '',
             documentUrl: '',
           },
@@ -1047,8 +1048,8 @@ export class CommunicationDispatcher {
             available: false,
             shareId: '',
             memberName: '',
-            fundName: 'Apex Wealth Scheme',
-            managerName: 'Ravi Kumar',
+            fundName: 'Financial Scheme',
+            managerName: 'Operations Manager',
             currentStatus: '',
             pendingAmount: 0,
             advanceAmount: 0,
@@ -1069,18 +1070,18 @@ export class CommunicationDispatcher {
           },
           recipients: [
             {
-              memberId: 'mem_mahesh_k',
-              memberName: 'Mahesh Kumar',
-              phone: '+919845010011',
+              contactId: '+910000000000',
+              memberName: 'Member Name',
+              phone: '+910000000000',
               shareId: 'SH-0104',
-              fundId: 'fund_apex_wealth_01',
-              fundName: 'Apex Wealth Scheme',
+              fundId: 'fund_01',
+              fundName: 'Financial Scheme',
               statement: {
                 available: true,
                 shareId: 'SH-0104',
-                memberName: 'Mahesh Kumar',
-                fundName: 'Apex Wealth Scheme',
-                managerName: 'Ravi Kumar',
+                memberName: 'Member Name',
+                fundName: 'Financial Scheme',
+                managerName: 'Operations Manager',
                 currentStatus: 'Pending',
                 pendingAmount: 5000,
                 advanceAmount: 0,
@@ -1088,21 +1089,21 @@ export class CommunicationDispatcher {
                 totalCycles: 12,
                 statementGeneratedAt: now,
               },
-              message: 'Hello Mahesh,\n\nShare ID: SH-0104\nMember: Mahesh Kumar\nChitti: Apex Wealth Scheme\nManager: Ravi Kumar\n\nCurrent Status: Pending ₹5,000\nCycle: 8 / 12\n\nThank you for your continued association with us.',
+              message: 'Hello Member Name,\n\nShare ID: SH-0104\nMember: Member Name\nFund: Financial Scheme\nManager: Operations Manager\n\nCurrent Status: Pending ₹5,000\nCycle: 8 / 12\n\nThank you for your continued association with us.',
             },
             {
-              memberId: 'mem_priya_s',
-              memberName: 'Priya Sharma',
-              phone: '+919845020022',
+              contactId: '+910000000001',
+              memberName: 'Member 2',
+              phone: '+910000000001',
               shareId: 'SH-0105',
-              fundId: 'fund_apex_wealth_01',
-              fundName: 'Apex Wealth Scheme',
+              fundId: 'fund_01',
+              fundName: 'Financial Scheme',
               statement: {
                 available: true,
                 shareId: 'SH-0105',
-                memberName: 'Priya Sharma',
-                fundName: 'Apex Wealth Scheme',
-                managerName: 'Ravi Kumar',
+                memberName: 'Member 2',
+                fundName: 'Financial Scheme',
+                managerName: 'Operations Manager',
                 currentStatus: 'Up to date',
                 pendingAmount: 0,
                 advanceAmount: 0,
@@ -1110,7 +1111,7 @@ export class CommunicationDispatcher {
                 totalCycles: 12,
                 statementGeneratedAt: now,
               },
-              message: 'Hello Priya Sharma,\n\nShare ID: SH-0105\nMember: Priya Sharma\nChitti: Apex Wealth Scheme\nManager: Ravi Kumar\n\nCurrent Status: Up to date\nCycle: 8 / 12\n\nThank you for your continued association with us.',
+              message: 'Hello Member 2,\n\nShare ID: SH-0105\nMember: Member 2\nFund: Financial Scheme\nManager: Operations Manager\n\nCurrent Status: Up to date\nCycle: 8 / 12\n\nThank you for your continued association with us.',
             },
           ],
         };
@@ -1121,19 +1122,19 @@ export class CommunicationDispatcher {
           batchId: 'cmp_batch_cmp_festive_offer_2026',
           dispatchId: 'DSP_1791192800_h3j8u',
           timestamp: now,
-          tenant: { tenantId: 'tenant_cf_demo_8812' },
-          fund: { fundId: 'fund_apex_wealth_01', fundName: 'Apex Wealth Scheme' },
-          manager: { managerId: 'mgr_ravi_kumar', managerName: 'Ravi Kumar', phone: '+919876543210', email: 'ravi.kumar@apexwealth.internal' },
+          tenant: { tenantId: 'tenant_workspace_01' },
+          fund: { fundId: 'fund_01', fundName: 'Financial Scheme' },
+          manager: { managerId: 'mgr_01', managerName: 'Operations Manager', phone: '+910000000000', email: 'manager@clearflow.internal' },
           recipient: {
-            memberId: '',
+            contactId: '',
             memberName: '',
             phone: '',
             shareId: '',
           },
           communication: {
             channel: 'WHATSAPP, SMS',
-            message: 'Exclusive New Gold Chit Series starting next week! Reserve your share early with zero processing fee.',
-            subject: 'Festive Chit Launch 2026',
+            message: 'Exclusive New Scheme Series starting next week! Reserve your share early with zero processing fee.',
+            subject: 'New Scheme Launch 2026',
             mediaUrl: '',
             documentUrl: '',
           },
@@ -1141,8 +1142,8 @@ export class CommunicationDispatcher {
             available: false,
             shareId: '',
             memberName: '',
-            fundName: 'Apex Wealth Scheme',
-            managerName: 'Ravi Kumar',
+            fundName: 'Financial Scheme',
+            managerName: 'Operations Manager',
             currentStatus: '',
             pendingAmount: 0,
             advanceAmount: 0,

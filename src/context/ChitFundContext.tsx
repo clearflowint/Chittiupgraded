@@ -19,7 +19,7 @@ import {
 import { db } from '../firebase';
 import { useAuth } from './AuthContext';
 import { DisplayIdRegistryService, HUMAN_ID_REGEX } from '../services/displayIdRegistry';
-import { normalizePhoneNumber } from '../utils/phone';
+import { normalizePhoneNumber, deduplicateContacts } from '../utils/phone';
 
 import { 
   CommunicationDispatch,
@@ -42,7 +42,7 @@ import {
   FinalReportSnapshot
 } from '../types';
 import { localDb, QueuedOfflineMutation } from '../services/localDb';
-import { FinancialEngine } from '../services/financialEngine';
+import { FinancialEngine, UniversalFinancialCore, FinancialEvent } from '../services/financialEngine';
 import { ImpactEngine } from '../services/impactEngine';
 import { CommunicationDispatcher } from '../services/communicationDispatcher';
 import { notificationService } from '../services/notifications';
@@ -85,7 +85,6 @@ interface ChitFundContextType {
     memberList?: { name: string; phone: string; shareCount: number; contactId?: string }[];
     totalPool?: number;
     numberOfShares?: number;
-    totalMonths?: number;
     commissionPercent?: number;
     totalCycles?: number | null;
   }) => Promise<string>;
@@ -146,6 +145,7 @@ interface ChitFundContextType {
     fundId: string;
     shareId: string;
     amount: number;
+    type?: 'CREDIT' | 'DEBIT';
     paymentMethod: PaymentMethod;
     paymentDate: string;
     reference?: string;
@@ -174,12 +174,11 @@ interface ChitFundContextType {
   createContact: (contact: Omit<Contact, 'contactId' | 'managerId' | 'createdAt' | 'updatedAt'>) => Promise<string>;
   updateContact: (contactId: string, data: Partial<Omit<Contact, 'contactId' | 'managerId' | 'createdAt' | 'updatedAt'>>) => Promise<void>;
   deleteContact: (contactId: string) => Promise<void>;
-  createGroup: (name: string, description: string, memberIds?: string[]) => Promise<string>;
+  createGroup: (name: string, description: string, contactIds?: string[]) => Promise<string>;
   updateGroup: (groupId: string, data: { name: string; description: string }) => Promise<void>;
   deleteGroup: (groupId: string) => Promise<void>;
-  updateGroupMembers: (groupId: string, memberIds: string[]) => Promise<void>;
+  updateGroupMembers: (groupId: string, contactIds: string[]) => Promise<void>;
   sendCampaign: (data: { title: string; message: string; channels?: CampaignChannel[]; channel?: string; fundId?: string; targetGroupIds?: string[]; targetAudience?: CampaignTargetAudience; recipientCount?: number }) => Promise<void>;
-  seedDemoDataIfEmpty: () => Promise<void>;
   rebuildMaterializedState: (fundId: string) => Promise<void>;
   updateShare: (data: {
     fundId: string;
@@ -229,6 +228,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [loading, setLoading] = useState(true);
   const [activeFundId, setActiveFundId] = useState<string | null>(null);
   const [pendingOfflineCount, setPendingOfflineCount] = useState<number>(0);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
   const seenCompletedDispatchesRef = React.useRef<Set<string>>(new Set());
 
@@ -333,7 +333,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return p;
         }));
       }
-      if (cContacts.length > 0) setContacts(cContacts);
+      if (cContacts.length > 0) setContacts(deduplicateContacts(cContacts));
       if (cGroups.length > 0) setGroups(cGroups);
       if (cCampaigns.length > 0) setCampaigns(cCampaigns);
       if (cDispatches.length > 0) {
@@ -353,47 +353,96 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // 2. Offline Queue Replay Worker: Executes queued mutations when connectivity resumes
   const syncOfflineQueue = useCallback(async () => {
-    if (!managerId || typeof navigator === 'undefined' || !navigator.onLine) return;
+    if (!managerId || typeof navigator === 'undefined' || !navigator.onLine || isSyncing) return;
 
-    const pending = await localDb.getPendingMutations(managerId);
-    if (pending.length === 0) return;
+    // 1. Cross-tab Concurrency Lock
+    const hasLock = await localDb.acquireSyncLock(managerId);
+    if (!hasLock) return;
 
-    for (const item of pending) {
-      try {
-        // Enforce strict tenant boundary: mutation must match current authenticated tenant
-        if (item.managerId !== managerId || (authUid && item.authUid && item.authUid !== authUid)) {
-          console.warn('Dropping queued mutation with tenant/auth mismatch:', item.operationId);
-          await localDb.removeQueuedMutation(managerId, item.operationId);
-          continue;
-        }
-
-        if (item.type === 'batch') {
-          // Batch execution handled by caller or single write
-          const batch = writeBatch(db);
-          for (const op of item.payload.operations || []) {
-            const targetRef = doc(db, op.collection, op.docId);
-            if (op.action === 'set') batch.set(targetRef, op.data);
-            else if (op.action === 'update') batch.update(targetRef, op.data);
-            else if (op.action === 'delete') batch.delete(targetRef);
-          }
-          await batch.commit();
-        } else {
-          const targetRef = doc(db, item.collection, item.docId);
-          if (item.type === 'set') await setDoc(targetRef, item.payload);
-          else if (item.type === 'update') await setDoc(targetRef, item.payload, { merge: true });
-        }
-        await localDb.removeQueuedMutation(managerId, item.operationId);
-      } catch (err) {
-        console.warn('Sync queue execution item error:', err);
+    setIsSyncing(true);
+    try {
+      // 2. Fetch pending mutations (Ordered by timestamp via Index)
+      const pending = await localDb.getPendingMutations(managerId);
+      if (pending.length === 0) {
+        await localDb.releaseSyncLock(managerId);
+        setIsSyncing(false);
+        return;
       }
-    }
 
-    const remaining = await localDb.getPendingMutations(managerId);
-    setPendingOfflineCount(remaining.length);
-    if (remaining.length === 0) {
-      notificationService.send('Cloud Synchronization Complete', 'All offline financial changes have been securely committed.', 'sync');
+      console.log(`Replaying ${pending.length} offline mutations for tenant ${managerId} in chronological order...`);
+
+      for (const item of pending) {
+        try {
+          // Enforce strict tenant boundary
+          if (item.managerId !== managerId || (authUid && item.authUid && item.authUid !== authUid)) {
+            console.warn('Dropping queued mutation with tenant/auth mismatch:', item.operationId);
+            await localDb.removeQueuedMutation(managerId, item.operationId);
+            continue;
+          }
+
+          await localDb.updateMutationStatus(managerId, item.operationId, 'processing');
+
+          const targetRef = doc(db, item.collection, item.docId);
+
+          // 3. Replay Logic with basic idempotency
+          if (item.type === 'batch') {
+            const batch = writeBatch(db);
+            for (const op of item.payload.operations || []) {
+              const opRef = doc(db, op.collection, op.docId);
+              if (op.action === 'set') batch.set(opRef, op.data);
+              else if (op.action === 'update') batch.update(opRef, op.data);
+              else if (op.action === 'delete') batch.delete(opRef);
+            }
+            await batch.commit();
+          } else {
+            if (item.collection === 'display_id_registry') {
+              // Authoritative transactional reservation with collision detection (Phase 2A.5)
+              await DisplayIdRegistryService.applyReplayReservation(item.payload);
+            } else if (item.type === 'set') {
+              // Idempotency: if creating a payment, it might already exist
+              await setDoc(targetRef, item.payload);
+            } else if (item.type === 'update') {
+              await setDoc(targetRef, item.payload, { merge: true });
+            } else if (item.type === 'delete') {
+              await deleteDoc(targetRef);
+            }
+          }
+
+          await localDb.removeQueuedMutation(managerId, item.operationId);
+        } catch (err: any) {
+          console.error(`Offline Replay Failure for ${item.operationId}:`, err);
+          
+          // Stop sequential replay if an error occurs to prevent dependent state corruption
+          // We mark as failed but keep in queue for manual retry or later reconciliation
+          await localDb.updateMutationStatus(managerId, item.operationId, 'failed', err?.message || String(err));
+          
+          // CRITICAL: Stop the loop. M2 must not execute if M1 failed.
+          break; 
+        }
+      }
+
+      const remaining = await localDb.getPendingMutations(managerId);
+      setPendingOfflineCount(remaining.length);
+      
+      if (remaining.length === 0) {
+        notificationService.send('Cloud Synchronization Complete', 'All offline financial changes have been securely committed.', 'sync');
+      } else {
+        const failedCount = remaining.filter(m => m.status === 'failed').length;
+        if (failedCount > 0) {
+          notificationService.send('Synchronization Interrupted', `${failedCount} items failed to sync. Check logs for details.`, 'sync');
+        }
+      }
+    } finally {
+      await localDb.releaseSyncLock(managerId);
+      setIsSyncing(false);
     }
-  }, [managerId]);
+  }, [managerId, authUid, isSyncing]);
+
+  useEffect(() => {
+    if (managerId && typeof navigator !== 'undefined' && navigator.onLine) {
+      syncOfflineQueue();
+    }
+  }, [managerId, syncOfflineQueue]);
 
   useEffect(() => {
     window.addEventListener('online', syncOfflineQueue);
@@ -422,7 +471,13 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           async (snapshot) => {
             const list: T[] = [];
             snapshot.forEach((d) => {
-              list.push({ ...d.data(), id: d.id } as unknown as T);
+              const itemData = d.data();
+              // Process authoritative financial data to remove legacy/derived fields that might conflict with UFC
+              if (colName === 'payments') {
+                delete (itemData as any).cycleNumber;
+                delete (itemData as any).allocations;
+              }
+              list.push({ ...itemData, id: d.id } as unknown as T);
             });
             setter(list);
             await localDb.putBatch(managerId, cacheStore, list);
@@ -479,8 +534,12 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     attachTenantListener<Cycle>('cycles', setCycles, 'cycles');
     attachTenantListener<Billing>('billings', setBillings, 'billings');
     attachTenantListener<Payout>('payouts', setPayouts, 'payouts');
-    attachBoundedTenantListener<Payment>('payments', setPayments, 'payments', 50);
-    attachTenantListener<Contact>('contacts', setContacts, 'contacts');
+    attachTenantListener<Payment>('payments', setPayments, 'payments');
+    attachTenantListener<Contact>('contacts', (val) => {
+      if (Array.isArray(val)) {
+        setContacts(deduplicateContacts(val));
+      }
+    }, 'contacts');
     attachTenantListener<Group>('groups', setGroups, 'groups');
     attachTenantListener<Campaign>('campaigns', setCampaigns, 'campaigns');
     attachTenantListener<CommunicationDispatch>('dispatches', (action) => {
@@ -546,503 +605,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
   }, [managerId, authUid]);
 
-  // Seed high-quality demo data (Idempotent using deterministic document IDs & persistent registry)
-  const seedDemoDataIfEmpty = useCallback(async () => {
-    if (!managerId || !authUid || loading) return;
-    
-    const demoFund1Id = `demo_fund_apex_${managerId}`;
-    const demoFund2Id = `demo_fund_emerald_${managerId}`;
-
-    const isPatternedId = (id?: string) => 
-      !id || id === 'A1B2' || id === 'E5M0' || /^X\d+Y\d+$/.test(id) || /^Z\d+W\d+$/.test(id) || /^SH-/.test(id) || /^S\d+$/.test(id);
-
-    // 1. Check if demo fund already exists in current tenant
-    const existingFund1 = funds.find(f => f.fundId === demoFund1Id);
-    const existingFund2 = funds.find(f => f.fundId === demoFund2Id);
-
-    if (existingFund1) {
-      // Check if existing demo entities have legacy patterned IDs (e.g. X1Y1, A1B2, etc.)
-      const patternedShares = shares.filter(s => s.managerId === managerId && (s.fundId === demoFund1Id || s.fundId === demoFund2Id) && isPatternedId(s.displayId));
-      const fund1NeedsMigration = isPatternedId(existingFund1.displayId);
-      const fund2NeedsMigration = existingFund2 && isPatternedId(existingFund2.displayId);
-
-      if (fund1NeedsMigration || fund2NeedsMigration || patternedShares.length > 0) {
-        console.log('Migrating legacy demo display IDs to persistent system-wide registry...');
-        try {
-          const itemsToMigrate: Array<{ entityType: 'FUND' | 'SHARE'; entityId: string }> = [];
-          if (fund1NeedsMigration) itemsToMigrate.push({ entityType: 'FUND', entityId: existingFund1.fundId });
-          if (fund2NeedsMigration && existingFund2) itemsToMigrate.push({ entityType: 'FUND', entityId: existingFund2.fundId });
-          patternedShares.forEach(s => itemsToMigrate.push({ entityType: 'SHARE', entityId: s.shareId }));
-
-          const migratedMap = await DisplayIdRegistryService.reserveMultipleDisplayIds(itemsToMigrate, managerId);
-          const batch = writeBatch(db);
-
-          if (fund1NeedsMigration) {
-            const newId = migratedMap.get(existingFund1.fundId);
-            if (newId) {
-              batch.update(doc(db, 'funds', existingFund1.fundId), { displayId: newId });
-              setFunds(prev => prev.map(f => f.fundId === existingFund1.fundId ? { ...f, displayId: newId } : f));
-              await localDb.put(managerId, 'funds', { ...existingFund1, displayId: newId });
-            }
-          }
-          if (fund2NeedsMigration && existingFund2) {
-            const newId = migratedMap.get(existingFund2.fundId);
-            if (newId) {
-              batch.update(doc(db, 'funds', existingFund2.fundId), { displayId: newId });
-              setFunds(prev => prev.map(f => f.fundId === existingFund2.fundId ? { ...f, displayId: newId } : f));
-              await localDb.put(managerId, 'funds', { ...existingFund2, displayId: newId });
-            }
-          }
-          for (const s of patternedShares) {
-            const newId = migratedMap.get(s.shareId);
-            if (newId) {
-              batch.update(doc(db, 'shares', s.shareId), { displayId: newId });
-              await localDb.put(managerId, 'shares', { ...s, displayId: newId });
-            }
-          }
-          setShares(prev => prev.map(s => {
-            const newId = migratedMap.get(s.shareId);
-            return newId ? { ...s, displayId: newId } : s;
-          }));
-
-          await batch.commit();
-          console.log('Legacy demo IDs migrated cleanly to persistent registry.');
-        } catch (mErr) {
-          console.warn('Demo ID migration notice:', mErr);
-        }
-      }
-
-      // Check if existing contacts have legacy IDs (e.g. demo_con_*) or displayId, and migrate them
-      const legacyContacts = contacts.filter(
-        (c) => c.managerId === managerId && (c.contactId.startsWith('demo_con_') || (c as any).displayId)
-      );
-      if (legacyContacts.length > 0) {
-        try {
-          const cBatch = writeBatch(db);
-          for (const c of legacyContacts) {
-            const normPhone = normalizePhoneNumber(c.phone);
-            const updated: Contact = {
-              ...c,
-              contactId: normPhone,
-              phone: normPhone,
-              updatedAt: new Date().toISOString(),
-            };
-            delete (updated as any).displayId;
-            cBatch.set(doc(db, 'contacts', normPhone), updated);
-            if (c.contactId !== normPhone) {
-              cBatch.delete(doc(db, 'contacts', c.contactId));
-              await localDb.delete(managerId, 'contacts', c.contactId);
-            }
-            await localDb.put(managerId, 'contacts', updated);
-          }
-          await cBatch.commit();
-        } catch (cErr) {
-          console.warn('Contact migration notice:', cErr);
-        }
-      }
-
-      // If existing funds are present but contact groups are not yet seeded, initialize default Contact Groups
-      if (groups.length === 0) {
-        try {
-          const nowStr = new Date().toISOString();
-          const defaultGroups: Group[] = [
-            {
-              groupId: `demo_grp_vip_${managerId}`,
-              displayId: 'GRP-VIP',
-              managerId,
-              name: 'VIP Customers',
-              description: 'High net-worth investors eligible for premium chitti pools exceeding ₹5 Lakhs.',
-              memberIds: contacts.slice(0, 12).map(c => c.contactId),
-              createdAt: nowStr,
-              updatedAt: nowStr,
-            },
-            {
-              groupId: `demo_grp_prospects_${managerId}`,
-              displayId: 'GRP-PRO',
-              managerId,
-              name: 'Prospective Members',
-              description: 'Interested leads awaiting upcoming cycle registration.',
-              memberIds: contacts.slice(12, 22).map(c => c.contactId),
-              createdAt: nowStr,
-              updatedAt: nowStr,
-            },
-            {
-              groupId: `demo_grp_followup_${managerId}`,
-              displayId: 'GRP-FOL',
-              managerId,
-              name: 'Follow Up',
-              description: 'Members requesting dividend performance reports and scheme brochures.',
-              memberIds: contacts.slice(22, 30).map(c => c.contactId),
-              createdAt: nowStr,
-              updatedAt: nowStr,
-            },
-          ];
-          const gBatch = writeBatch(db);
-          defaultGroups.forEach(g => gBatch.set(doc(db, 'groups', g.groupId), g));
-          await gBatch.commit();
-          await localDb.putBatch(managerId, 'groups', defaultGroups);
-          setGroups(defaultGroups);
-        } catch (grpErr) {
-          console.warn('Notice seeding default contact groups:', grpErr);
-        }
-      }
-      return;
-    }
-
-    try {
-      const batch = writeBatch(db);
-      const now = new Date().toISOString();
-      const auditId = `demo_audit_bootstrap_${managerId}`;
-
-      // Reserve genuine random registered IDs for Demo Funds and Demo Shares
-      const demoItemsToReserve: Array<{ entityType: 'FUND' | 'SHARE'; entityId: string }> = [
-        { entityType: 'FUND', entityId: demoFund1Id },
-        { entityType: 'FUND', entityId: demoFund2Id },
-        ...Array.from({ length: 20 }, (_, i) => ({ entityType: 'SHARE' as const, entityId: `demo_share_1_${i + 1}_${managerId}` })),
-        ...Array.from({ length: 10 }, (_, i) => ({ entityType: 'SHARE' as const, entityId: `demo_share_2_${i + 1}_${managerId}` })),
-      ];
-
-      const reservedIdMap = await DisplayIdRegistryService.reserveMultipleDisplayIds(demoItemsToReserve, managerId);
-
-      // 1. Create Contacts (Master CRM Records - deterministic IDs)
-      const memberNames = [
-        'Ananya Deshmukh', 'Vikramaditya Rao', 'Kavita Sundaram', 'Rohan Mehra', 'Deepak Chawla',
-        'Sunil Gavaskar', 'Meena Iyer', 'Karthik Raja', 'Harish Babu', 'Pooja Hegde',
-        'Siddharth Roy', 'Neha Kapoor', 'Arvind Kejriwal', 'Bhavna Parekh', 'Girish Karnad',
-        'Tanvi Shah', 'Manoj Bajpayee', 'Shreya Ghoshal', 'Naveen Jindal', 'Zoya Akhtar',
-        'Suresh Raina', 'Rahul Dravid', 'Sourav Ganguly', 'VVS Laxman', 'Anil Kumble', 
-        'Zaheer Khan', 'Irfan Pathan', 'Harbhajan Singh', 'Prithvi Shaw', 'Shubman Gill'
-      ];
-
-      const seededContacts: Contact[] = memberNames.map((name, i) => {
-        const phone = normalizePhoneNumber(`+91 98450 ${10000 + i}`);
-        return {
-          contactId: phone,
-          managerId,
-          name,
-          phone,
-          email: `${name.toLowerCase().replace(' ', '.')}@example.com`,
-          createdAt: now,
-          updatedAt: now,
-          communicationStatus: 'subscribed'
-        };
-      });
-
-      // ----------------------------------------------------
-      // FUND 1: Apex Wealth Series I (High Value, Ongoing)
-      // ----------------------------------------------------
-      const totalPool1 = 500000;
-      const totalMonths1 = 20;
-      const numberOfShares1 = 20;
-      const commissionPercent1 = 5;
-      const fund1DisplayId = reservedIdMap.get(demoFund1Id) || FinancialEngine.generateRandomHumanDisplayId();
-
-      const fund1: Fund = {
-        fundId: demoFund1Id,
-        displayId: fund1DisplayId,
-        managerId,
-        fundName: 'Apex Wealth Series I (₹5 Lakhs)',
-        totalPool: totalPool1,
-        totalPoolPaise: FinancialEngine.toPaise(totalPool1),
-        totalMonths: totalMonths1,
-        numberOfShares: numberOfShares1,
-        currentMonth: 5,
-        cycleFrequency: 'monthly',
-        commissionPercent: commissionPercent1,
-        startDate: '2026-05-01',
-        status: 'active',
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      const seededShares1: Share[] = [];
-      const seededTokens1: PortalTokenRecord[] = [];
-      
-      seededContacts.forEach((contact, i) => {
-        if (i >= 20) return; // Only 20 shares for fund 1
-        const shareId = `demo_share_1_${i + 1}_${managerId}`;
-        const portalToken = `demo_token_1_${i + 1}_${managerId}`;
-        const shareDisplayId = reservedIdMap.get(shareId) || FinancialEngine.generateRandomHumanDisplayId();
-        
-        // Custom states for demo variety
-        const isWinner = i < 3;
-        const wonMonth = isWinner ? i + 1 : null;
-        
-        // Varying financials
-        let totalPaid = isWinner ? 21500 : 21500;
-        if (i === 4) totalPaid = 15000; // Someone with arrears
-        if (i === 10) totalPaid = 25000; // Someone with advance
-        
-        const totalBilled = 21500; // 5 months @ avg ~4300
-        const resolved = FinancialEngine.resolveBalance(totalBilled, totalPaid);
-
-        const share: Share = {
-          shareId,
-          displayId: shareDisplayId,
-          managerId,
-          fundId: demoFund1Id,
-          memberId: contact.contactId,
-          contactId: contact.contactId,
-          memberName: contact.name,
-          memberPhone: contact.phone,
-          shareNumber: i + 1,
-          shareCount: 1,
-          hasClaimedPrize: isWinner,
-          wonMonth,
-          status: isWinner ? 'drawn' : 'undrawn',
-          totalBilled,
-          totalPaid,
-          arrears: resolved.arrears,
-          advance: resolved.advance,
-          portalToken,
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        seededShares1.push(share);
-        seededTokens1.push({
-          token: portalToken,
-          managerId,
-          fundId: demoFund1Id,
-          shareId,
-          memberName: contact.name,
-          shareNumber: i + 1,
-          createdAt: now,
-        });
-      });
-
-      // Seed 5 cycles for Fund 1
-      const bidDiscounts1 = [100000, 95000, 90000, 85000, 80000];
-      const seededCycles1: Cycle[] = [];
-      const seededBillings1: Billing[] = [];
-      const seededPayouts1: Payout[] = [];
-
-      for (let m = 1; m <= 5; m++) {
-        const cycleId = `demo_cycle_1_${m}_${managerId}`;
-        const winningBid = bidDiscounts1[m - 1];
-        const calc = FinancialEngine.calculateCycle({
-          totalPool: totalPool1,
-          totalMonths: totalMonths1,
-          totalShares: numberOfShares1,
-          winningBidAmount: winningBid,
-          commissionPercent: commissionPercent1,
-        });
-
-        const isClosed = m < 5;
-        const cycle: Cycle = {
-          cycleId,
-          displayId: FinancialEngine.generateDisplayId('CY'),
-          managerId,
-          fundId: demoFund1Id,
-          cycleNumber: m,
-          monthIndex: m,
-          auctionDate: `2026-0${4 + m}-15`,
-          winningBidAmount: winningBid,
-          winnerShareId: isClosed ? seededShares1[m - 1].shareId : null,
-          winnerMemberName: isClosed ? seededShares1[m - 1].memberName : null,
-          organizerCommission: calc.organizerCommission,
-          dividendPool: calc.dividendPool,
-          dividendPerShare: calc.dividendPerShare,
-          grossInstallment: calc.grossInstallment,
-          netInstallmentDue: calc.netInstallmentDue,
-          winnerNetPayout: calc.winnerNetPayout,
-          isAuctionClosed: isClosed,
-          status: isClosed ? 'finalized' : 'bidding',
-          createdAt: now,
-          finalizedAt: isClosed ? `2026-0${4 + m}-15T18:00:00Z` : null,
-        };
-        seededCycles1.push(cycle);
-
-        // Billings
-        seededShares1.forEach(s => {
-          seededBillings1.push({
-            billingId: `demo_bill_1_${m}_${s.shareId}`,
-            managerId,
-            fundId: demoFund1Id,
-            cycleId,
-            shareId: s.shareId,
-            billAmount: cycle.netInstallmentDue,
-            billAmountPaise: FinancialEngine.toPaise(cycle.netInstallmentDue),
-            createdAt: now,
-            updatedAt: now,
-            createdBy: authUid,
-            version: 1,
-          });
-        });
-
-        // Payouts
-        if (isClosed && cycle.winnerShareId && cycle.winnerNetPayout > 0) {
-          seededPayouts1.push({
-            payoutId: `demo_payout_1_${m}_${cycle.winnerShareId}`,
-            managerId,
-            fundId: demoFund1Id,
-            cycleId,
-            shareId: cycle.winnerShareId,
-            memberId: seededShares1[m - 1].memberId,
-            amount: cycle.winnerNetPayout,
-            amountPaise: FinancialEngine.toPaise(cycle.winnerNetPayout),
-            payoutDate: cycle.auctionDate,
-            paymentMethod: 'Bank',
-            status: 'disbursed',
-            createdAt: now,
-            createdBy: authUid,
-          });
-        }
-      }
-
-      // ----------------------------------------------------
-      // FUND 2: Emerald Micro (Low Value, Just Started)
-      // ----------------------------------------------------
-      const fund2DisplayId = reservedIdMap.get(demoFund2Id) || FinancialEngine.generateRandomHumanDisplayId();
-      const fund2: Fund = {
-        fundId: demoFund2Id,
-        displayId: fund2DisplayId,
-        managerId,
-        fundName: 'Emerald Micro (₹1 Lakh)',
-        totalPool: 100000,
-        totalPoolPaise: FinancialEngine.toPaise(100000),
-        totalMonths: 10,
-        numberOfShares: 10,
-        currentMonth: 1,
-        cycleFrequency: 'monthly',
-        commissionPercent: 5,
-        startDate: '2026-09-01',
-        status: 'active',
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      const seededShares2: Share[] = [];
-      for (let i = 0; i < 10; i++) {
-        const contact = seededContacts[i];
-        const shareId = `demo_share_2_${i + 1}_${managerId}`;
-        const shareDisplayId = reservedIdMap.get(shareId) || FinancialEngine.generateRandomHumanDisplayId();
-        seededShares2.push({
-          shareId,
-          displayId: shareDisplayId,
-          managerId,
-          fundId: demoFund2Id,
-          memberId: contact.contactId,
-          contactId: contact.contactId,
-          memberName: contact.name,
-          memberPhone: contact.phone,
-          shareNumber: i + 1,
-          shareCount: 1,
-          hasClaimedPrize: false,
-          wonMonth: null,
-          status: 'undrawn',
-          totalBilled: 0,
-          totalPaid: 0,
-          arrears: 0,
-          advance: 0,
-          portalToken: `demo_token_2_${i + 1}_${managerId}`,
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-
-      // Final Batch Write
-      seededContacts.forEach(c => batch.set(doc(db, 'contacts', c.contactId), c));
-      
-      batch.set(doc(db, 'funds', demoFund1Id), fund1);
-      seededShares1.forEach(s => batch.set(doc(db, 'shares', s.shareId), s));
-      seededTokens1.forEach(t => batch.set(doc(db, 'portal_tokens', t.token), t));
-      seededCycles1.forEach(c => batch.set(doc(db, 'cycles', c.cycleId), c));
-      seededBillings1.forEach(b => batch.set(doc(db, 'billings', b.billingId), b));
-      seededPayouts1.forEach(p => batch.set(doc(db, 'payouts', p.payoutId), p));
-
-      batch.set(doc(db, 'funds', demoFund2Id), fund2);
-      seededShares2.forEach(s => batch.set(doc(db, 'shares', s.shareId), s));
-
-      const seededGroups: Group[] = [
-        {
-          groupId: `demo_grp_vip_${managerId}`,
-          displayId: 'GRP-VIP',
-          managerId,
-          name: 'VIP Customers',
-          description: 'High net-worth investors eligible for premium chitti pools exceeding ₹5 Lakhs.',
-          memberIds: seededContacts.slice(0, 12).map(c => c.contactId),
-          createdAt: now,
-          updatedAt: now,
-        },
-        {
-          groupId: `demo_grp_prospects_${managerId}`,
-          displayId: 'GRP-PRO',
-          managerId,
-          name: 'Prospective Members',
-          description: 'Interested leads awaiting upcoming cycle registration.',
-          memberIds: seededContacts.slice(12, 22).map(c => c.contactId),
-          createdAt: now,
-          updatedAt: now,
-        },
-        {
-          groupId: `demo_grp_followup_${managerId}`,
-          displayId: 'GRP-FOL',
-          managerId,
-          name: 'Follow Up',
-          description: 'Members requesting dividend performance reports and scheme brochures.',
-          memberIds: seededContacts.slice(22, 30).map(c => c.contactId),
-          createdAt: now,
-          updatedAt: now,
-        },
-      ];
-      seededGroups.forEach(g => batch.set(doc(db, 'groups', g.groupId), g));
-
-      const audit: AuditRecord = {
-        auditId,
-        managerId,
-        actorUid,
-        action: 'FUND_BOOTSTRAP',
-        entityType: 'FUND',
-        entityId: demoFund1Id,
-        timestamp: now,
-        createdAt: serverTimestamp(),
-        reason: 'Seeded comprehensive enterprise demo dataset with Contacts, 2 Schemes, 15+ Cycles, and Ledger records.',
-      };
-      batch.set(doc(db, 'audits', auditId), audit);
-
-      await batch.commit();
-
-      // Update Local Cache
-      await localDb.putBatch(managerId, 'contacts', seededContacts);
-      await localDb.put(managerId, 'funds', fund1);
-      await localDb.putBatch(managerId, 'shares', seededShares1);
-      await localDb.putBatch(managerId, 'cycles', seededCycles1);
-      await localDb.putBatch(managerId, 'billings', seededBillings1);
-      await localDb.putBatch(managerId, 'payouts', seededPayouts1);
-      await localDb.put(managerId, 'funds', fund2);
-      await localDb.putBatch(managerId, 'shares', seededShares2);
-      await localDb.putBatch(managerId, 'groups', seededGroups);
-      await localDb.put(managerId, 'audits', audit);
-
-      // Refresh Context State (Selective)
-      setContacts(seededContacts);
-      setGroups(seededGroups);
-      // Ensure we don't duplicate in state either
-      setFunds(prev => {
-        const next = [...prev];
-        if (!next.some(f => f.fundId === fund1.fundId)) next.push(fund1);
-        if (!next.some(f => f.fundId === fund2.fundId)) next.push(fund2);
-        return next;
-      });
-      setShares(prev => [...prev, ...seededShares1, ...seededShares2]);
-      setCycles(prev => [...prev, ...seededCycles1]);
-      setBillings(prev => [...prev, ...seededBillings1]);
-      setPayouts(prev => [...prev, ...seededPayouts1]);
-      setActiveFundId(demoFund1Id);
-      
-      notificationService.send('Demo Seeding Complete', 'CRM Contacts and Portfolio Workspaces have been initialized.', 'sync');
-    } catch (e) {
-      console.warn('Enterprise Seeding Exception:', e);
-    }
-  }, [managerId, authUid, loading, funds]);
-
-  useEffect(() => {
-    if (funds.length === 0 && managerId && !loading) {
-      seedDemoDataIfEmpty();
-    }
-  }, [funds.length, managerId, loading, seedDemoDataIfEmpty]);
-
   // Phase 4 & 6: Create New Fund Wizard (Atomic Multi-Document Batch)
   const createFund = async (data: {
     fundName: string;
@@ -1053,7 +615,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     memberList?: { name: string; phone: string; shareCount: number; contactId?: string }[];
     totalPool?: number;
     numberOfShares?: number;
-    totalMonths?: number;
     commissionPercent?: number;
     totalCycles?: number | null;
   }): Promise<string> => {
@@ -1071,7 +632,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ...memberShareIds.map(sId => ({ entityType: 'SHARE' as const, entityId: sId }))
     ];
 
-    const reservedIdsMap = await DisplayIdRegistryService.reserveMultipleDisplayIds(itemsToReserve, managerId);
+    const reservedIdsMap = await DisplayIdRegistryService.reserveMultipleDisplayIds(itemsToReserve, managerId, authUid);
     const fundDisplayId = reservedIdsMap.get(fundId) || FinancialEngine.generateRandomHumanDisplayId();
 
     if (!HUMAN_ID_REGEX.test(fundDisplayId)) {
@@ -1080,7 +641,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const pool = data.totalPool || 0;
     const totalShares = data.numberOfShares !== undefined ? data.numberOfShares : memberList.length;
-    const totalMonths = data.totalMonths !== undefined ? data.totalMonths : 1;
+    const totalCyclesVal = data.totalCycles !== undefined && data.totalCycles !== null ? data.totalCycles : 12;
     const commPercent = data.commissionPercent || 0;
     const frequency = data.cycleFrequency || 'monthly';
     const start = data.startDate || new Date().toISOString().split('T')[0];
@@ -1093,15 +654,14 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       totalPool: pool,
       totalPoolPaise: FinancialEngine.toPaise(pool),
       numberOfShares: totalShares,
-      totalMonths,
-      currentMonth: 1,
+      totalCycles: totalCyclesVal,
+      currentCycle: 1,
       cycleFrequency: frequency,
       commissionPercent: commPercent,
       startDate: start,
       reminderSchedule: data.reminderSchedule || '3 days before cycle date',
       notes: data.notes || '',
       status: 'active',
-      totalCycles: data.totalCycles || null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1116,21 +676,50 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const portalToken = FinancialEngine.generateCryptoToken();
       const shareDisplayId = reservedIdsMap.get(shareId) || FinancialEngine.generateRandomHumanDisplayId();
 
+      const normPhone = normalizePhoneNumber(mem.phone);
+      if (!normPhone) {
+        throw new Error(`Valid phone number is required for member: ${mem.name}`);
+      }
+      let targetContactId = mem.contactId || normPhone;
+
+      if (normPhone) {
+        const existing = contacts.find(
+          (c) => c.managerId === managerId && (c.contactId === normPhone || normalizePhoneNumber(c.phone) === normPhone)
+        );
+        if (existing) {
+          targetContactId = existing.contactId;
+        } else {
+          targetContactId = normPhone;
+          const newContact: Contact = {
+            contactId: normPhone,
+            phone: normPhone,
+            managerId,
+            name: mem.name.trim(),
+            communicationStatus: 'subscribed',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          await setDoc(doc(db, 'contacts', normPhone), newContact);
+          await localDb.put(managerId, 'contacts', newContact);
+          setContacts((prev) => [newContact, ...prev.filter(c => c.contactId !== normPhone)]);
+        }
+      }
+
       const share: Share = {
         shareId,
         displayId: shareDisplayId,
         managerId,
         fundId,
-        memberId: mem.contactId || FinancialEngine.generateCryptoToken(),
+        contactId: targetContactId || normPhone || '',
         memberName: mem.name,
-        memberPhone: mem.phone,
+        memberPhone: normPhone || mem.phone,
         shareNumber: shareNum,
         shareCount: mem.shareCount || 1,
         hasClaimedPrize: false,
-        wonMonth: null,
         status: 'undrawn',
         totalBilled: 0,
-        totalPaid: 0,
+        totalCredits: 0,
+        totalDebits: 0,
         arrears: 0,
         advance: 0,
         portalToken,
@@ -1189,15 +778,23 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (err) {
-      console.warn('Offline mode: queuing fund creation mutation:', err);
+      console.warn('Offline mode: queuing full fund creation batch:', err);
+      const operations: any[] = [
+        { action: 'set', collection: 'funds', docId: fundId, data: newFund }
+      ];
+      for (const s of createdShares) operations.push({ action: 'set', collection: 'shares', docId: s.shareId, data: s });
+      for (const t of createdTokens) operations.push({ action: 'set', collection: 'portal_tokens', docId: t.token, data: t });
+      operations.push({ action: 'set', collection: 'ledgers', docId: chittiLedger.ledgerId, data: chittiLedger });
+      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
+
       await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
+        operationId: fundId, // Deterministic fundId as operationId
         managerId,
         authUid,
         collection: 'funds',
         docId: fundId,
-        type: 'set',
-        payload: newFund,
+        type: 'batch',
+        payload: { operations },
       });
       setPendingOfflineCount((prev) => prev + 1);
     }
@@ -1207,9 +804,19 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     await localDb.put(managerId, 'ledgers', chittiLedger);
     await localDb.put(managerId, 'audits', audit);
 
-    setFunds((prev) => [newFund, ...prev]);
-    setShares((prev) => [...createdShares, ...prev]);
-    setLedgers((prev) => [chittiLedger, ...prev]);
+    setFunds((prev) => [
+      newFund,
+      ...prev.filter((f) => f.fundId !== newFund.fundId)
+    ]);
+    const createdShareIdSet = new Set(createdShares.map((s) => s.shareId));
+    setShares((prev) => [
+      ...createdShares,
+      ...prev.filter((s) => !createdShareIdSet.has(s.shareId))
+    ]);
+    setLedgers((prev) => [
+      chittiLedger,
+      ...prev.filter((l) => l.ledgerId !== chittiLedger.ledgerId)
+    ]);
     setActiveFundId(fundId);
 
     notificationService.send('Scheme Initialized', `${data.fundName} created successfully.`, 'cycle');
@@ -1226,15 +833,15 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!managerId || !authUid) throw new Error('Not authenticated');
 
     const fund = funds.find((f) => f.fundId === data.fundId);
-    if (!fund) throw new Error('Chitti scheme not found');
+    if (!fund) throw new Error('Fund scheme not found');
     
     // Explicit manager ownership validation
     if (fund.managerId !== managerId) {
-      throw new Error('Unauthorised: This Chitti scheme does not belong to you.');
+      throw new Error('Unauthorised: This Fund scheme does not belong to you.');
     }
 
     if (fund.status === 'ended') {
-      throw new Error('Cannot add share to an ENDED Chitti. Re-activate the Chitti first.');
+      throw new Error('Cannot add share to an ENDED Fund. Re-activate the Fund first.');
     }
 
     const fundShares = shares.filter((s) => s.fundId === data.fundId);
@@ -1245,10 +852,41 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       entityType: 'SHARE',
       entityId: shareId,
       managerId,
+      authUid,
     });
 
     if (!HUMAN_ID_REGEX.test(shareDisplayId)) {
       throw new Error('Invalid Share ID generated. Please try again.');
+    }
+
+    const normPhone = normalizePhoneNumber(data.memberPhone);
+    if (!normPhone) {
+      throw new Error('Valid phone number is required to add a share.');
+    }
+    let targetContactId = data.contactId || normPhone;
+
+    if (normPhone) {
+      const existing = contacts.find(
+        (c) => c.managerId === managerId && (c.contactId === normPhone || normalizePhoneNumber(c.phone) === normPhone)
+      );
+
+      if (existing) {
+        targetContactId = existing.contactId;
+      } else {
+        targetContactId = normPhone;
+        const newContact: Contact = {
+          contactId: normPhone,
+          phone: normPhone,
+          managerId,
+          name: data.memberName.trim(),
+          communicationStatus: 'subscribed',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        await setDoc(doc(db, 'contacts', normPhone), newContact);
+        await localDb.put(managerId, 'contacts', newContact);
+        setContacts((prev) => [newContact, ...prev.filter(c => c.contactId !== normPhone)]);
+      }
     }
 
     const newShare: Share = {
@@ -1256,17 +894,17 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       displayId: shareDisplayId,
       managerId,
       fundId: data.fundId,
-      memberId: data.contactId || FinancialEngine.generateCryptoToken(),
-      contactId: data.contactId,
+      contactId: targetContactId || normPhone || '',
       memberName: data.memberName.trim(),
-      memberPhone: data.memberPhone.trim(),
+      memberPhone: normPhone || data.memberPhone.trim(),
       shareNumber: nextShareNumber,
       shareCount: data.shareCount || 1,
       hasClaimedPrize: false,
-      wonMonth: null,
+      wonCycleNumber: null,
       status: 'undrawn',
       totalBilled: 0,
-      totalPaid: 0,
+      totalCredits: 0,
+      totalDebits: 0,
       arrears: 0,
       advance: 0,
       portalToken,
@@ -1302,7 +940,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       entityId: shareId,
       timestamp: new Date().toISOString(),
       createdAt: serverTimestamp(),
-      reason: `Added Share #${nextShareNumber} (${data.memberName}) to Chitti ${fund.fundName}.`,
+      reason: `Added Share #${nextShareNumber} (${data.memberName}) to Fund ${fund.fundName}.`,
     };
 
     try {
@@ -1316,15 +954,30 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Offline mode: queuing addShare mutation:', e);
+      console.warn('Offline mode: queuing full addShare transaction batch:', e);
       await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
+        operationId: shareId, // Deterministic shareId (Phase 2A.5)
         managerId,
         authUid,
         collection: 'shares',
         docId: shareId,
-        type: 'set',
-        payload: newShare,
+        type: 'batch',
+        payload: {
+          operations: [
+            { action: 'set', collection: 'shares', docId: shareId, data: newShare },
+            { action: 'set', collection: 'portal_tokens', docId: portalToken, data: tokenRecord },
+            { 
+              action: 'update', 
+              collection: 'funds', 
+              docId: data.fundId, 
+              data: {
+                numberOfShares: updatedFund.numberOfShares,
+                updatedAt: updatedFund.updatedAt,
+              }
+            },
+            { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
+          ]
+        },
       });
       setPendingOfflineCount((prev) => prev + 1);
     }
@@ -1333,7 +986,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     await localDb.put(managerId, 'funds', updatedFund);
     await localDb.put(managerId, 'audits', audit);
 
-    setShares((prev) => [...prev, newShare]);
+    setShares((prev) => [...prev.filter((s) => s.shareId !== newShare.shareId), newShare]);
     setFunds((prev) => prev.map((f) => (f.fundId === data.fundId ? updatedFund : f)));
     notificationService.send('Share Added', `Allotted Share #${nextShareNumber} to ${data.memberName}.`, 'sync');
 
@@ -1354,9 +1007,9 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!managerId || !authUid) throw new Error('Not authenticated');
 
     const fund = funds.find((f) => f.fundId === data.fundId);
-    if (!fund) throw new Error('Chitti scheme not found');
+    if (!fund) throw new Error('Fund scheme not found');
     if (fund.status === 'ended') {
-      throw new Error('Cannot create cycle on an ENDED Chitti. Re-activate the Chitti first.');
+      throw new Error('Cannot create cycle on an ENDED Fund. Re-activate the Fund first.');
     }
 
     const fundCycles = cycles.filter((c) => c.fundId === data.fundId);
@@ -1406,13 +1059,20 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         .reduce((sum, b) => sum + b.billAmount, 0);
 
       const newTotalBilled = otherCyclesBilled + billAmt;
-      const resolved = FinancialEngine.resolveBalance(newTotalBilled, share.totalPaid);
+      const nextState = UniversalFinancialCore.calculateNextState(
+        {
+          totalBilled: otherCyclesBilled,
+          totalCredits: share.totalCredits,
+          totalDebits: share.totalDebits,
+          arrears: share.arrears,
+          advance: share.advance
+        },
+        { type: 'BILLING', amount: billAmt }
+      );
 
       const updatedShare: Share = {
         ...share,
-        totalBilled: newTotalBilled,
-        arrears: resolved.arrears,
-        advance: resolved.advance,
+        ...nextState,
         updatedAt: new Date().toISOString(),
       };
       updatedShares.push(updatedShare);
@@ -1427,7 +1087,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       cycleName: name,
       startDate: start,
       endDate: end,
-      monthIndex: nextCycleNum,
       auctionDate: start,
       winningBidAmount: 0,
       organizerCommission: commission,
@@ -1441,10 +1100,13 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       createdAt: new Date().toISOString(),
     };
 
+    const fundTotalCycles = fund.totalCycles ?? 12;
+    const newTotalCycles = Math.max(fundTotalCycles, nextCycleNum);
+
     const updatedFund: Fund = {
       ...fund,
-      currentMonth: nextCycleNum,
-      totalMonths: Math.max(fund.totalMonths, nextCycleNum),
+      currentCycle: nextCycleNum,
+      totalCycles: newTotalCycles,
       updatedAt: new Date().toISOString(),
     };
 
@@ -1457,15 +1119,15 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       entityId: cycleId,
       timestamp: new Date().toISOString(),
       createdAt: serverTimestamp(),
-      reason: `Created Cycle #${nextCycleNum} ("${name}") for Chitti ${fund.fundName}.`,
+      reason: `Created Cycle #${nextCycleNum} ("${name}") for Fund ${fund.fundName}.`,
     };
 
     try {
       const batch = writeBatch(db);
       batch.set(doc(db, 'cycles', cycleId), newCycle);
       batch.update(doc(db, 'funds', data.fundId), {
-        currentMonth: updatedFund.currentMonth,
-        totalMonths: updatedFund.totalMonths,
+        currentCycle: updatedFund.currentCycle,
+        totalCycles: updatedFund.totalCycles,
         updatedAt: updatedFund.updatedAt,
       });
       for (const b of billingDocs) {
@@ -1474,6 +1136,8 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       for (const us of updatedShares) {
         batch.update(doc(db, 'shares', us.shareId), {
           totalBilled: us.totalBilled,
+          totalCredits: us.totalCredits,
+          totalDebits: us.totalDebits,
           arrears: us.arrears,
           advance: us.advance,
           updatedAt: us.updatedAt,
@@ -1482,15 +1146,51 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Offline mode: queuing createCycle mutation:', e);
+      console.warn('Offline mode: queuing full cycle creation batch:', e);
+      const operations: any[] = [
+        { action: 'set', collection: 'cycles', docId: cycleId, data: newCycle },
+        { 
+          action: 'update', 
+          collection: 'funds', 
+          docId: data.fundId, 
+          data: {
+            currentCycle: updatedFund.currentCycle,
+            totalCycles: updatedFund.totalCycles,
+            updatedAt: updatedFund.updatedAt,
+          }
+        }
+      ];
+
+      for (const b of billingDocs) {
+        operations.push({ action: 'set', collection: 'billings', docId: b.billingId, data: b });
+      }
+
+      for (const us of updatedShares) {
+        operations.push({
+          action: 'update',
+          collection: 'shares',
+          docId: us.shareId,
+          data: {
+            totalBilled: us.totalBilled,
+            totalCredits: us.totalCredits,
+            totalDebits: us.totalDebits,
+            arrears: us.arrears,
+            advance: us.advance,
+            updatedAt: us.updatedAt,
+          }
+        });
+      }
+
+      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
+
       await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
+        operationId: `create_cycle_${cycleId}`, // Deterministic cycleId (Phase 2A.5)
         managerId,
         authUid,
         collection: 'cycles',
         docId: cycleId,
-        type: 'set',
-        payload: newCycle,
+        type: 'batch',
+        payload: { operations },
       });
       setPendingOfflineCount((prev) => prev + 1);
     }
@@ -1505,8 +1205,9 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       await localDb.put(managerId, 'shares', us);
     }
 
-    setCycles((prev) => [...prev, newCycle]);
-    setBillings((prev) => [...prev, ...billingDocs]);
+    setCycles((prev) => [...prev.filter((c) => c.cycleId !== newCycle.cycleId), newCycle]);
+    const billingIdSet = new Set(billingDocs.map((b) => b.billingId));
+    setBillings((prev) => [...prev.filter((b) => !billingIdSet.has(b.billingId)), ...billingDocs]);
     setFunds((prev) => prev.map((f) => (f.fundId === data.fundId ? updatedFund : f)));
     if (updatedShares.length > 0) {
       setShares((prev) =>
@@ -1534,9 +1235,9 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!managerId || !authUid) throw new Error('Not authenticated');
 
     const fund = funds.find((f) => f.fundId === data.fundId);
-    if (!fund) throw new Error('Chitti scheme not found');
+    if (!fund) throw new Error('Fund scheme not found');
     if (fund.status === 'ended') {
-      throw new Error('Cannot update bills on an ENDED Chitti. Re-activate the Chitti first.');
+      throw new Error('Cannot update bills on an ENDED Fund. Re-activate the Fund first.');
     }
 
     const targetCycle = cycles.find((c) => c.cycleId === data.cycleId && c.fundId === data.fundId);
@@ -1581,13 +1282,20 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         .reduce((sum, b) => sum + b.billAmount, 0);
 
       const newTotalBilled = otherCyclesBilled + billAmount;
-      const resolved = FinancialEngine.resolveBalance(newTotalBilled, share.totalPaid);
+      const nextState = UniversalFinancialCore.calculateNextState(
+        {
+          totalBilled: otherCyclesBilled,
+          totalCredits: share.totalCredits,
+          totalDebits: share.totalDebits,
+          arrears: share.arrears,
+          advance: share.advance
+        },
+        { type: 'BILLING', amount: billAmount }
+      );
 
       const updatedShare: Share = {
         ...share,
-        totalBilled: newTotalBilled,
-        arrears: resolved.arrears,
-        advance: resolved.advance,
+        ...nextState,
         updatedAt: new Date().toISOString(),
       };
       updatedShares.push(updatedShare);
@@ -1603,7 +1311,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       organizerCommission: data.organizerCommission ?? targetCycle.organizerCommission,
     };
 
-    const totalCollected = updatedShares.reduce((a, s) => a + s.totalPaid, 0);
+    const totalCollected = updatedShares.reduce((a, s) => a + (s.totalCredits - s.totalDebits), 0);
     const totalArrears = updatedShares.reduce((a, s) => a + s.arrears, 0);
 
     const chittiLedger = ledgers.find((l) => l.fundId === data.fundId && l.ledgerType === 'CHITTI_LEDGER');
@@ -1706,9 +1414,9 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!managerId || !authUid) throw new Error('Not authenticated');
 
     const fund = funds.find((f) => f.fundId === data.fundId);
-    if (!fund) throw new Error('Chitti scheme not found');
+    if (!fund) throw new Error('Fund scheme not found');
     if (fund.status === 'ended') {
-      throw new Error('Cannot record payout on an ENDED Chitti. Re-activate the Chitti first.');
+      throw new Error('Cannot record payout on an ENDED Fund. Re-activate the Fund first.');
     }
 
     const share = shares.find((s) => s.shareId === data.shareId && s.fundId === data.fundId);
@@ -1735,7 +1443,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       fundId: data.fundId,
       cycleId: data.cycleId,
       shareId: data.shareId,
-      memberId: share.memberId,
+      contactId: share.contactId,
       amount: data.payoutAmount,
       amountPaise: FinancialEngine.toPaise(data.payoutAmount),
       payoutDate: data.payoutDate || new Date().toISOString().split('T')[0],
@@ -1751,7 +1459,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const updatedShare: Share = {
       ...share,
       hasClaimedPrize: true,
-      wonMonth: targetCycle.cycleNumber,
+      wonCycleNumber: targetCycle.cycleNumber,
       status: 'drawn',
       updatedAt: now,
     };
@@ -1790,7 +1498,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'payouts', payoutId), newPayout);
       batch.update(doc(db, 'shares', data.shareId), {
         hasClaimedPrize: true,
-        wonMonth: targetCycle.cycleNumber,
+        wonCycleNumber: targetCycle.cycleNumber,
         status: 'drawn',
         updatedAt: now,
       });
@@ -1809,10 +1517,58 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Network payout recording notice:', e);
+      console.warn('Offline mode: queuing full payout recording batch:', e);
+      const operations: any[] = [
+        { action: 'set', collection: 'payouts', docId: payoutId, data: newPayout },
+        { 
+          action: 'update', 
+          collection: 'shares', 
+          docId: data.shareId, 
+          data: {
+            hasClaimedPrize: true,
+            wonCycleNumber: targetCycle.cycleNumber,
+            status: 'drawn',
+            updatedAt: now,
+          }
+        },
+        {
+          action: 'update',
+          collection: 'cycles',
+          docId: data.cycleId,
+          data: {
+            winnerShareId: share.shareId,
+            winnerMemberName: share.memberName,
+            winnerNetPayout: data.payoutAmount,
+            isAuctionClosed: true,
+          }
+        }
+      ];
+      if (updatedLedger) {
+        operations.push({
+          action: 'update',
+          collection: 'ledgers',
+          docId: updatedLedger.ledgerId,
+          data: {
+            totalDisbursed: updatedLedger.totalDisbursed,
+            updatedAt: now,
+          }
+        });
+      }
+      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
+
+      await localDb.queueOfflineMutation({
+        operationId: cleanKey,
+        managerId,
+        authUid,
+        collection: 'payouts',
+        docId: payoutId,
+        type: 'batch',
+        payload: { operations },
+      });
+      setPendingOfflineCount((prev) => prev + 1);
     }
 
-    setPayouts((prev) => [...prev, newPayout]);
+    setPayouts((prev) => [...prev.filter((p) => p.payoutId !== newPayout.payoutId), newPayout]);
     setShares((prev) => prev.map((s) => (s.shareId === data.shareId ? updatedShare : s)));
     setCycles((prev) => prev.map((c) => (c.cycleId === data.cycleId ? updatedCycle : c)));
     if (updatedLedger) {
@@ -1847,21 +1603,21 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     if (payout.fundId !== data.fundId) {
-      throw new Error('Security Violation: Payout does not belong to the specified Chitti');
+      throw new Error('Security Violation: Payout does not belong to the specified Fund');
     }
 
     const share = shares.find((s) => s.shareId === payout.shareId);
     if (!share) throw new Error('Associated share not found');
 
     if (share.fundId !== data.fundId) {
-      throw new Error('Security Violation: Associated share does not belong to the specified Chitti');
+      throw new Error('Security Violation: Associated share does not belong to the specified Fund');
     }
 
     const targetCycle = cycles.find((c) => c.cycleId === payout.cycleId);
     if (!targetCycle) throw new Error('Associated cycle not found');
 
     if (targetCycle.fundId !== data.fundId) {
-      throw new Error('Security Violation: Associated cycle does not belong to the specified Chitti');
+      throw new Error('Security Violation: Associated cycle does not belong to the specified Fund');
     }
 
     const now = new Date().toISOString();
@@ -1880,12 +1636,12 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const hasOtherPayouts = otherActivePayouts.length > 0;
     const otherPayoutCycle = hasOtherPayouts ? cycles.find(c => c.cycleId === otherActivePayouts[0].cycleId) : null;
-    const wonMonthVal = otherPayoutCycle ? otherPayoutCycle.cycleNumber : null;
+    const wonCycleVal = otherPayoutCycle ? otherPayoutCycle.cycleNumber : null;
 
     const updatedShare: Share = {
       ...share,
       hasClaimedPrize: hasOtherPayouts,
-      wonMonth: wonMonthVal,
+      wonCycleNumber: wonCycleVal,
       status: hasOtherPayouts ? 'drawn' : 'undrawn',
       updatedAt: now,
     };
@@ -1928,7 +1684,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
       batch.update(doc(db, 'shares', share.shareId), {
         hasClaimedPrize: updatedShare.hasClaimedPrize,
-        wonMonth: updatedShare.wonMonth,
+        wonCycleNumber: updatedShare.wonCycleNumber,
         status: updatedShare.status,
         updatedAt: now,
       });
@@ -1947,7 +1703,64 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Network payout revocation notice:', e);
+      console.warn('Offline mode: queuing full payout revocation batch:', e);
+      const operations: any[] = [
+        { 
+          action: 'update', 
+          collection: 'payouts', 
+          docId: payout.payoutId, 
+          data: {
+            status: 'cancelled',
+            updatedAt: now,
+            updatedBy: authUid,
+          }
+        },
+        {
+          action: 'update',
+          collection: 'shares',
+          docId: share.shareId,
+          data: {
+            hasClaimedPrize: updatedShare.hasClaimedPrize,
+            wonCycleNumber: updatedShare.wonCycleNumber,
+            status: updatedShare.status,
+            updatedAt: now,
+          }
+        },
+        {
+          action: 'update',
+          collection: 'cycles',
+          docId: targetCycle.cycleId,
+          data: {
+            winnerShareId: null,
+            winnerMemberName: null,
+            winnerNetPayout: 0,
+            isAuctionClosed: false,
+          }
+        }
+      ];
+      if (updatedLedger) {
+        operations.push({
+          action: 'update',
+          collection: 'ledgers',
+          docId: updatedLedger.ledgerId,
+          data: {
+            totalDisbursed: updatedLedger.totalDisbursed,
+            updatedAt: now,
+          }
+        });
+      }
+      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
+
+      await localDb.queueOfflineMutation({
+        operationId: FinancialEngine.generateCryptoToken(),
+        managerId,
+        authUid,
+        collection: 'payouts',
+        docId: payout.payoutId,
+        type: 'batch',
+        payload: { operations },
+      });
+      setPendingOfflineCount((prev) => prev + 1);
     }
 
     setPayouts((prev) => prev.map((p) => (p.payoutId === payout.payoutId ? updatedPayout : p)));
@@ -2025,7 +1838,32 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Offline mode: queuing metadata update:', e);
+      console.warn('Offline mode: queuing metadata update batch:', e);
+      const operations: any[] = [
+        { 
+          action: 'update', 
+          collection: 'cycles', 
+          docId: data.cycleId, 
+          data: {
+            cycleName: updatedCycle.cycleName,
+            startDate: updatedCycle.startDate,
+            endDate: updatedCycle.endDate,
+            auctionDate: updatedCycle.auctionDate,
+          } 
+        },
+        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
+      ];
+
+      await localDb.queueOfflineMutation({
+        operationId: `update_cycle_${data.cycleId}_${Date.now()}`,
+        managerId,
+        authUid,
+        collection: 'cycles',
+        docId: data.cycleId,
+        type: 'batch',
+        payload: { operations },
+      });
+      setPendingOfflineCount((prev) => prev + 1);
     }
 
     await localDb.put(managerId, 'cycles', updatedCycle);
@@ -2067,7 +1905,30 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Offline mode: queuing fund metadata update:', e);
+      console.warn('Offline mode: queuing fund metadata update batch:', e);
+      const operations: any[] = [
+        { 
+          action: 'update', 
+          collection: 'funds', 
+          docId: fundId, 
+          data: {
+            totalCycles: updatedFund.totalCycles,
+            updatedAt: updatedFund.updatedAt,
+          } 
+        },
+        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
+      ];
+
+      await localDb.queueOfflineMutation({
+        operationId: `update_fund_${fundId}_${Date.now()}`,
+        managerId,
+        authUid,
+        collection: 'funds',
+        docId: fundId,
+        type: 'batch',
+        payload: { operations },
+      });
+      setPendingOfflineCount((prev) => prev + 1);
     }
 
     await localDb.put(managerId, 'funds', updatedFund);
@@ -2087,7 +1948,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const fundCycles = cycles.filter((c) => c.fundId === fundId);
 
     const totalBilled = fundShares.reduce((a, s) => a + s.totalBilled, 0);
-    const totalCollected = fundShares.reduce((a, s) => a + s.totalPaid, 0);
+    const totalCollected = fundShares.reduce((a, s) => a + (s.totalCredits - s.totalDebits), 0);
     const totalDisbursed = fundCycles.filter((c) => c.isAuctionClosed).reduce((a, c) => a + c.winnerNetPayout, 0);
     const totalCommission = fundCycles.filter((c) => c.isAuctionClosed).reduce((a, c) => a + c.organizerCommission, 0);
     const totalArrears = fundShares.reduce((a, s) => a + s.arrears, 0);
@@ -2116,7 +1977,8 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         status: s.status,
         hasClaimedPrize: s.hasClaimedPrize,
         totalBilled: s.totalBilled,
-        totalPaid: s.totalPaid,
+        totalCredits: s.totalCredits,
+        totalDebits: s.totalDebits,
         arrears: s.arrears,
         advance: s.advance,
       })),
@@ -2149,7 +2011,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       entityId: fundId,
       timestamp: endedAt,
       createdAt: serverTimestamp(),
-      reason: `Chitti ${fund.fundName} marked as ENDED. Final report materialized.`,
+      reason: `Fund ${fund.fundName} marked as ENDED. Final report materialized.`,
     };
 
     try {
@@ -2164,21 +2026,30 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Offline mode: queuing endFund mutation:', e);
+      console.warn('Offline mode: queuing endFund batch mutation:', e);
+      const operations: any[] = [
+        { 
+          action: 'update', 
+          collection: 'funds', 
+          docId: fundId, 
+          data: {
+            status: 'ended',
+            endedAt,
+            endedByManagerId: managerId,
+            finalReportSnapshot: reportSnapshot,
+            updatedAt: endedAt,
+          } 
+        },
+        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
+      ];
       await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
+        operationId: `end_fund_${fundId}`, // Deterministic operationId (Phase 2A.5)
         managerId,
         authUid,
         collection: 'funds',
         docId: fundId,
-        type: 'update',
-        payload: {
-          status: 'ended',
-          endedAt,
-          endedByManagerId: managerId,
-          finalReportSnapshot: reportSnapshot,
-          updatedAt: endedAt,
-        },
+        type: 'batch',
+        payload: { operations },
       });
       setPendingOfflineCount((prev) => prev + 1);
     }
@@ -2187,7 +2058,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     await localDb.put(managerId, 'audits', audit);
 
     setFunds((prev) => prev.map((f) => (f.fundId === fundId ? updatedFund : f)));
-    notificationService.send('Chitti Ended', `${fund.fundName} has been closed. Final report generated.`, 'sync');
+    notificationService.send('Fund Ended', `${fund.fundName} has been closed. Final report generated.`, 'sync');
 
     return reportSnapshot;
   };
@@ -2196,9 +2067,9 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!managerId || !authUid) throw new Error('Not authenticated');
 
     const fund = funds.find((f) => f.fundId === fundId);
-    if (!fund) throw new Error('Chitti scheme not found');
+    if (!fund) throw new Error('Fund scheme not found');
     if (fund.status !== 'ended') {
-      throw new Error('Chitti is not currently ENDED.');
+      throw new Error('Fund is not currently ENDED.');
     }
 
     const updatedAt = new Date().toISOString();
@@ -2217,7 +2088,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       entityId: fundId,
       timestamp: updatedAt,
       createdAt: serverTimestamp(),
-      reason: `Revoked ENDED state for Chitti ${fund.fundName}. Restored to ACTIVE status.`,
+      reason: `Revoked ENDED state for Fund ${fund.fundName}. Restored to ACTIVE status.`,
     };
 
     try {
@@ -2229,14 +2100,28 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Offline mode: queuing revokeEndFund mutation:', e);
+      console.warn('Offline mode: queuing full revokeEndFund batch:', e);
+      const operations: any[] = [
+        { action: 'update', collection: 'funds', docId: fundId, data: { status: 'active', updatedAt } },
+        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
+      ];
+      await localDb.queueOfflineMutation({
+        operationId: `revoke_end_${fundId}`, // Deterministic operationId (Phase 2A.5)
+        managerId,
+        authUid,
+        collection: 'funds',
+        docId: fundId,
+        type: 'batch',
+        payload: { operations },
+      });
+      setPendingOfflineCount((prev) => prev + 1);
     }
 
     await localDb.put(managerId, 'funds', updatedFund);
     await localDb.put(managerId, 'audits', audit);
 
     setFunds((prev) => prev.map((f) => (f.fundId === fundId ? updatedFund : f)));
-    notificationService.send('Chitti Reactivated', `${fund.fundName} has been restored to ACTIVE status.`, 'sync');
+    notificationService.send('Fund Reactivated', `${fund.fundName} has been restored to ACTIVE status.`, 'sync');
   };
 
   // Phase 4 & 5: Record Payment (Atomic Multi-Document Batch with Authoritative Server-Side Idempotency)
@@ -2244,6 +2129,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     fundId: string;
     shareId: string;
     amount: number;
+    type?: 'CREDIT' | 'DEBIT';
     paymentMethod: PaymentMethod;
     paymentDate: string;
     reference?: string;
@@ -2256,8 +2142,11 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!share) throw new Error('Share allotment not found');
 
     if (share.fundId !== data.fundId) {
-      throw new Error('Security Violation: Share does not belong to the specified Chitti');
+      throw new Error('Security Violation: Share does not belong to the specified Fund');
     }
+
+    const type = data.type || 'CREDIT';
+    const absAmount = Math.abs(data.amount);
 
     const rawKey = data.idempotencyKey || FinancialEngine.generateCryptoToken();
     const cleanIdempotencyKey = rawKey.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -2289,22 +2178,28 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     }
 
-    // Universal Financial Core: Payments are Share-level financial activity
-    const updatedTotalPaid = share.totalPaid + data.amount;
-    const resolved = FinancialEngine.resolveBalance(share.totalBilled, updatedTotalPaid);
-    const updatedArrears = resolved.arrears;
-    const updatedAdvance = resolved.advance;
+    const nextState = UniversalFinancialCore.calculateNextState(
+      {
+        totalBilled: share.totalBilled,
+        totalCredits: share.totalCredits,
+        totalDebits: share.totalDebits,
+        arrears: share.arrears,
+        advance: share.advance
+      },
+      { type, amount: absAmount }
+    );
 
     const payment: Payment = {
       paymentId: paymentDocId,
       displayId: paymentDisplayId,
       managerId,
       fundId: data.fundId,
-      memberId: share.memberId,
+      contactId: share.contactId,
       memberName: share.memberName,
       shareId: share.shareId,
       shareNumber: share.shareNumber,
-      amount: data.amount,
+      amount: absAmount,
+      type,
       paymentDate: data.paymentDate,
       paymentMethod: data.paymentMethod,
       reference: data.reference,
@@ -2316,9 +2211,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const updatedShare: Share = {
       ...share,
-      totalPaid: updatedTotalPaid,
-      arrears: updatedArrears,
-      advance: updatedAdvance,
+      ...nextState,
       updatedAt: new Date().toISOString(),
     };
 
@@ -2331,7 +2224,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       entityId: paymentDocId,
       timestamp: new Date().toISOString(),
       createdAt: serverTimestamp(),
-      reason: `Recorded installment of ₹${data.amount} for Share #${share.shareNumber} (${share.memberName}). Method: ${data.paymentMethod}. Arrears: ₹${resolved.arrears}, Advance: ₹${resolved.advance}.`,
+      reason: `Recorded installment of ₹${data.amount} for Share #${share.shareNumber} (${share.memberName}). Method: ${data.paymentMethod}. Arrears: ₹${nextState.arrears}, Advance: ₹${nextState.advance}.`,
       operationId: cleanIdempotencyKey,
     };
 
@@ -2340,9 +2233,10 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const batch = writeBatch(db);
       batch.set(paymentRef, payment);
       batch.update(doc(db, 'shares', share.shareId), {
-        totalPaid: updatedTotalPaid,
-        arrears: updatedArrears,
-        advance: updatedAdvance,
+        totalCredits: nextState.totalCredits,
+        totalDebits: nextState.totalDebits,
+        arrears: nextState.arrears,
+        advance: nextState.advance,
         updatedAt: updatedShare.updatedAt,
       });
       if (share.portalToken) {
@@ -2362,15 +2256,52 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (err) {
-      console.warn('Offline mode: queuing payment transaction:', err);
+      console.warn('Offline mode: queuing full payment transaction batch:', err);
+      const operations: any[] = [
+        { action: 'set', collection: 'payments', docId: paymentDocId, data: payment },
+        { 
+          action: 'update', 
+          collection: 'shares', 
+          docId: share.shareId, 
+          data: {
+            totalCredits: nextState.totalCredits,
+            totalDebits: nextState.totalDebits,
+            arrears: nextState.arrears,
+            advance: nextState.advance,
+            updatedAt: updatedShare.updatedAt,
+          }
+        },
+        { action: 'set', collection: 'audits', docId: audit.auditId, data: audit }
+      ];
+
+      if (share.portalToken) {
+        operations.push({
+          action: 'set',
+          collection: 'portal_tokens',
+          docId: share.portalToken,
+          data: {
+            token: share.portalToken,
+            managerId,
+            fundId: data.fundId,
+            shareId: share.shareId,
+            memberName: share.memberName,
+            shareNumber: share.shareNumber,
+            createdAt: share.createdAt,
+            shareSnapshot: updatedShare,
+            fundSnapshot: funds.find((f) => f.fundId === data.fundId) || null,
+            recentPayments: [payment, ...payments.filter((p) => p.shareId === share.shareId).slice(0, 19)],
+          }
+        });
+      }
+
       await localDb.queueOfflineMutation({
         operationId: cleanIdempotencyKey,
         managerId,
         authUid,
         collection: 'payments',
         docId: paymentDocId,
-        type: 'set',
-        payload: payment,
+        type: 'batch',
+        payload: { operations },
       });
       setPendingOfflineCount((prev) => prev + 1);
     }
@@ -2379,7 +2310,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     await localDb.put(managerId, 'shares', updatedShare);
     await localDb.put(managerId, 'audits', audit);
 
-    setPayments((prev) => [payment, ...prev]);
+    setPayments((prev) => [payment, ...prev.filter((p) => p.paymentId !== payment.paymentId)]);
     setShares((prev) => prev.map((s) => (s.shareId === share.shareId ? updatedShare : s)));
 
     notificationService.send('Payment Logged', `Received ₹${data.amount} from ${share.memberName} via ${data.paymentMethod}.`, 'payment');
@@ -2405,19 +2336,19 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (data.winnerShareId && !share) throw new Error('Winner share allotment not found');
 
     if (share && share.fundId !== data.fundId) {
-      throw new Error('Security Violation: Share does not belong to the specified Chitti');
+      throw new Error('Security Violation: Share does not belong to the specified Fund');
     }
 
     const cycle = cycles.find((c) => c.fundId === data.fundId && c.cycleNumber === data.cycleNumber);
     if (!cycle) throw new Error('Target cycle not found');
 
     if (cycle.fundId !== data.fundId) {
-      throw new Error('Security Violation: Auction cycle does not belong to the specified Chitti');
+      throw new Error('Security Violation: Auction cycle does not belong to the specified Fund');
     }
 
     const calc = FinancialEngine.calculateCycle({
       totalPool: fund.totalPool,
-      totalMonths: fund.totalMonths,
+      totalCycles: fund.totalCycles,
       totalShares: fund.numberOfShares,
       winningBidAmount: winningBid,
       commissionPercent: fund.commissionPercent,
@@ -2431,7 +2362,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ...cycle,
       winningBidAmount: winningBid,
       winnerShareId: share?.shareId || '',
-      winnerMemberId: share?.memberId || '',
+      winnerContactId: share?.contactId || '',
       winnerMemberName: share?.memberName || '',
       organizerCommission: finalOrganizerCommission,
       dividendPool: calc.dividendPool,
@@ -2447,35 +2378,39 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const updatedWinnerShare: Share | null = share ? {
       ...share,
       hasClaimedPrize: true,
-      wonMonth: data.cycleNumber,
+      wonCycleNumber: data.cycleNumber,
       status: 'drawn',
       updatedAt: new Date().toISOString(),
     } : null;
 
-    // Calculate and persist updated billing & arrears across ALL shares in the fund with advance drawdown
+    // Calculate and persist updated billing & arrears across ALL shares in the fund (Phase 2B.2: Independent state)
     const updatedAllShares = shares.map((s) => {
       if (s.fundId !== data.fundId) return s;
       const isWinner = share ? s.shareId === share.shareId : false;
-      const currentAdvance = s.advance || 0;
       const installmentDue = finalNetInstallmentDue;
-      const advanceDrawn = Math.min(currentAdvance, installmentDue);
-      const remainingAdvance = currentAdvance - advanceDrawn;
-      const totalBilled = s.totalBilled + installmentDue;
-      const totalPaid = s.totalPaid + advanceDrawn;
-      const arrears = Math.max(0, totalBilled - totalPaid);
+
+      const nextState = UniversalFinancialCore.calculateNextState(
+        {
+          totalBilled: s.totalBilled,
+          totalCredits: s.totalCredits,
+          totalDebits: s.totalDebits,
+          arrears: s.arrears,
+          advance: s.advance
+        },
+        { type: 'BILLING', amount: installmentDue }
+      );
+
       return {
         ...(isWinner && updatedWinnerShare ? updatedWinnerShare : s),
-        totalBilled,
-        totalPaid,
-        arrears,
-        advance: remainingAdvance,
+        ...nextState,
         updatedAt: new Date().toISOString(),
       };
     });
 
     // Schedule next cycle if available
     let nextCycle: Cycle | null = null;
-    if (data.cycleNumber < fund.totalMonths) {
+    const fundTotalCycles = fund.totalCycles ?? 12;
+    if (data.cycleNumber < fundTotalCycles) {
       const nextCycleNum = data.cycleNumber + 1;
       const nextCycleId = FinancialEngine.generateCryptoToken();
       nextCycle = {
@@ -2484,7 +2419,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         managerId,
         fundId: data.fundId,
         cycleNumber: nextCycleNum,
-        monthIndex: nextCycleNum,
         auctionDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
         winningBidAmount: 0,
         organizerCommission: calc.organizerCommission,
@@ -2506,7 +2440,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       fundId: fund.fundId,
       ledgerType: 'CHITTI_LEDGER',
       totalPool: fund.totalPool,
-      totalCollected: updatedAllShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + s.totalPaid, 0),
+      totalCollected: updatedAllShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + (s.totalCredits - s.totalDebits), 0),
       totalDisbursed: cycles.filter((c) => c.fundId === fund.fundId && c.isAuctionClosed).reduce((a, c) => a + c.winnerNetPayout, 0) + calc.winnerNetPayout,
       totalArrears: updatedAllShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + s.arrears, 0),
       totalMembers: fund.numberOfShares,
@@ -2540,7 +2474,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         fundId: data.fundId,
         cycleId: cycle.cycleId,
         shareId: share.shareId,
-        memberId: share.memberId,
+        contactId: share.contactId,
         amount: finalWinnerNetPayout,
         amountPaise: FinancialEngine.toPaise(finalWinnerNetPayout),
         payoutDate: new Date().toISOString().split('T')[0],
@@ -2562,7 +2496,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       entityId: cycle.cycleId,
       timestamp: new Date().toISOString(),
       createdAt: serverTimestamp(),
-      reason: `Month #${data.cycleNumber} closed. Winner: ${share ? `Share #${share.shareNumber} (${share.memberName})` : 'None'}. Payout: ₹${finalWinnerNetPayout}. Persisted billing across all ${fund.numberOfShares} shares.`,
+      reason: `Cycle #${data.cycleNumber} closed. Winner: ${share ? `Share #${share.shareNumber} (${share.memberName})` : 'None'}. Payout: ₹${finalWinnerNetPayout}. Persisted billing across all ${fund.numberOfShares} shares.`,
     };
 
     // ATOMIC WRITE BATCH: Cycle + All Shares + Next Cycle + Ledger + Audit + Billings + Payout
@@ -2570,7 +2504,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const batch = writeBatch(db);
       batch.update(doc(db, 'cycles', cycle.cycleId), updatedCycle as any);
       batch.update(doc(db, 'funds', fund.fundId), {
-        currentMonth: Math.min(fund.totalMonths, data.cycleNumber + 1),
+        currentCycle: Math.min(fundTotalCycles, data.cycleNumber + 1),
         updatedAt: new Date().toISOString(),
       });
 
@@ -2578,11 +2512,12 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       for (const s of updatedAllShares.filter((sh) => sh.fundId === data.fundId)) {
         batch.update(doc(db, 'shares', s.shareId), {
           totalBilled: s.totalBilled,
-          totalPaid: s.totalPaid,
+          totalCredits: s.totalCredits,
+          totalDebits: s.totalDebits,
           arrears: s.arrears,
           advance: s.advance,
           hasClaimedPrize: s.hasClaimedPrize,
-          wonMonth: s.wonMonth,
+          wonCycleNumber: s.wonCycleNumber,
           status: s.status,
           updatedAt: s.updatedAt,
         });
@@ -2609,15 +2544,62 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       await batch.commit();
     } catch (err) {
-      console.warn('Offline mode: queuing cycle finalization batch:', err);
+      console.warn('Offline mode: queuing full cycle finalization batch:', err);
+      const operations: any[] = [
+        { action: 'update', collection: 'cycles', docId: cycle.cycleId, data: updatedCycle },
+        { 
+          action: 'update', 
+          collection: 'funds', 
+          docId: fund.fundId, 
+          data: {
+            currentCycle: Math.min(fundTotalCycles, data.cycleNumber + 1),
+            updatedAt: new Date().toISOString(),
+          }
+        }
+      ];
+
+      for (const s of updatedAllShares.filter((sh) => sh.fundId === data.fundId)) {
+        operations.push({
+          action: 'update',
+          collection: 'shares',
+          docId: s.shareId,
+          data: {
+            totalBilled: s.totalBilled,
+            totalCredits: s.totalCredits,
+            totalDebits: s.totalDebits,
+            arrears: s.arrears,
+            advance: s.advance,
+            hasClaimedPrize: s.hasClaimedPrize,
+            wonCycleNumber: s.wonCycleNumber,
+            status: s.status,
+            updatedAt: s.updatedAt,
+          }
+        });
+      }
+
+      for (const b of billingDocs) {
+        operations.push({ action: 'set', collection: 'billings', docId: b.billingId, data: b });
+      }
+
+      if (payoutDoc) {
+        operations.push({ action: 'set', collection: 'payouts', docId: payoutDoc.payoutId, data: payoutDoc });
+      }
+
+      if (nextCycle) {
+        operations.push({ action: 'set', collection: 'cycles', docId: nextCycle.cycleId, data: nextCycle });
+      }
+
+      operations.push({ action: 'set', collection: 'ledgers', docId: chittiLedger.ledgerId, data: chittiLedger });
+      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
+
       await localDb.queueOfflineMutation({
         operationId: FinancialEngine.generateCryptoToken(),
         managerId,
         authUid,
         collection: 'cycles',
         docId: cycle.cycleId,
-        type: 'update',
-        payload: updatedCycle,
+        type: 'batch',
+        payload: { operations },
       });
       setPendingOfflineCount((prev) => prev + 1);
     }
@@ -2643,13 +2625,13 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return [...filtered, ...billingDocs];
     });
     if (payoutDoc) {
-      setPayouts((prev) => [...prev, payoutDoc!]);
+      setPayouts((prev) => [...prev.filter((p) => p.payoutId !== payoutDoc!.payoutId), payoutDoc!]);
     }
-    setShares(updatedAllShares);
+    setShares(prev => prev.map(s => updatedAllShares.find(us => us.shareId === s.shareId) || s));
     setLedgers((prev) => [...prev.filter((l) => l.ledgerId !== chittiLedger.ledgerId), chittiLedger]);
 
     notificationService.send(
-      `Cycle Billing Finalized: Month #${data.cycleNumber}`,
+      `Cycle Billing Finalized: Cycle #${data.cycleNumber}`,
       `Winner: ${share ? share.memberName : 'None'}. Net prize payout: ₹${FinancialEngine.formatNumber(finalWinnerNetPayout)}.`,
       'auction'
     );
@@ -2672,10 +2654,10 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!fund || !cycle || !targetShare) throw new Error('Target record not found');
 
     if (targetShare.fundId !== data.fundId) {
-      throw new Error('Security Violation: Share does not belong to the specified Chitti');
+      throw new Error('Security Violation: Share does not belong to the specified Fund');
     }
     if (cycle.fundId !== data.fundId) {
-      throw new Error('Security Violation: Auction cycle does not belong to the specified Chitti');
+      throw new Error('Security Violation: Auction cycle does not belong to the specified Fund');
     }
 
     const proposedBid = data.winningBidAmount ?? (cycle.winningBidAmount || Math.round(fund.totalPool * 0.15));
@@ -2687,6 +2669,9 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       targetCycle: cycle,
       targetShare,
       allShares: shares,
+      billings,
+      payments,
+      action: data.action,
       proposedBidAmount: proposedBid,
       reason: data.reason,
       actorUid,
@@ -2694,6 +2679,8 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const audit: AuditRecord = {
       ...plan.auditPayload,
+      managerId: managerId || '',
+      actorUid: actorUid || '',
       auditId: FinancialEngine.generateCryptoToken(),
       createdAt: serverTimestamp(),
     };
@@ -2705,7 +2692,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       fundId: fund.fundId,
       ledgerType: 'CHITTI_LEDGER',
       totalPool: fund.totalPool,
-      totalCollected: plan.updatedShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + s.totalPaid, 0),
+      totalCollected: plan.updatedShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + (s.totalCredits - s.totalDebits), 0),
       totalDisbursed: plan.updatedCycles.filter((c) => c.fundId === fund.fundId && c.isAuctionClosed).reduce((a, c) => a + c.winnerNetPayout, 0),
       totalArrears: plan.updatedShares.filter((s) => s.fundId === fund.fundId).reduce((a, s) => a + s.arrears, 0),
       totalMembers: fund.numberOfShares,
@@ -2718,12 +2705,19 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       for (const c of plan.updatedCycles.filter((cy) => cy.fundId === fund.fundId)) {
         batch.update(doc(db, 'cycles', c.cycleId), c as any);
       }
+      for (const b of plan.updatedBillings.filter((bi) => bi.fundId === fund.fundId)) {
+        batch.update(doc(db, 'billings', b.billingId), {
+          billAmount: b.billAmount,
+          updatedAt: b.updatedAt,
+        });
+      }
       for (const s of plan.updatedShares.filter((sh) => sh.fundId === fund.fundId)) {
         batch.update(doc(db, 'shares', s.shareId), {
           totalBilled: s.totalBilled,
           arrears: s.arrears,
+          advance: s.advance,
           hasClaimedPrize: s.hasClaimedPrize,
-          wonMonth: s.wonMonth,
+          wonCycleNumber: s.wonCycleNumber,
           status: s.status,
           updatedAt: s.updatedAt,
         });
@@ -2732,44 +2726,81 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (err) {
-      console.warn('Offline mode: queuing historical reconciliation batch:', err);
+      console.warn('Offline mode: queuing full historical reconciliation batch:', err);
+      const operations: any[] = [];
+      
+      for (const c of plan.updatedCycles.filter((cy) => cy.fundId === fund.fundId)) {
+        operations.push({ action: 'update', collection: 'cycles', docId: c.cycleId, data: c });
+      }
+      
+      for (const b of plan.updatedBillings.filter((bi) => bi.fundId === fund.fundId)) {
+        operations.push({ 
+          action: 'update', 
+          collection: 'billings', 
+          docId: b.billingId, 
+          data: {
+            billAmount: b.billAmount,
+            updatedAt: b.updatedAt,
+          }
+        });
+      }
+      
+      for (const s of plan.updatedShares.filter((sh) => sh.fundId === fund.fundId)) {
+        operations.push({
+          action: 'update',
+          collection: 'shares',
+          docId: s.shareId,
+          data: {
+            totalBilled: s.totalBilled,
+            arrears: s.arrears,
+            advance: s.advance,
+            hasClaimedPrize: s.hasClaimedPrize,
+            wonCycleNumber: s.wonCycleNumber,
+            status: s.status,
+            updatedAt: s.updatedAt,
+          }
+        });
+      }
+      
+      operations.push({ action: 'set', collection: 'ledgers', docId: chittiLedger.ledgerId, data: chittiLedger });
+      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
+
       await localDb.queueOfflineMutation({
         operationId: FinancialEngine.generateCryptoToken(),
         managerId,
         authUid,
         collection: 'cycles',
         docId: cycle.cycleId,
-        type: 'update',
-        payload: { cycleId: cycle.cycleId, reason: data.reason },
+        type: 'batch',
+        payload: { operations },
       });
       setPendingOfflineCount((prev) => prev + 1);
     }
 
     await localDb.putBatch(managerId, 'cycles', plan.updatedCycles);
+    await localDb.putBatch(managerId, 'billings', plan.updatedBillings);
     await localDb.putBatch(managerId, 'shares', plan.updatedShares);
     await localDb.put(managerId, 'ledgers', chittiLedger);
     await localDb.put(managerId, 'audits', audit);
 
     setCycles(plan.updatedCycles);
+    setBillings((prev) => {
+      const newBillings = [...prev];
+      for (const ub of plan.updatedBillings) {
+        const idx = newBillings.findIndex((b) => b.billingId === ub.billingId);
+        if (idx !== -1) newBillings[idx] = ub;
+      }
+      return newBillings;
+    });
     setShares(plan.updatedShares);
     setLedgers((prev) => [...prev.filter((l) => l.ledgerId !== chittiLedger.ledgerId), chittiLedger]);
 
-    notificationService.send('Historical Reconciliation Applied', `Reconciled Month #${cycle.cycleNumber}. New Winner: ${plan.newWinnerShare.memberName}.`, 'sync');
+    notificationService.send('Historical Reconciliation Applied', `Reconciled Cycle #${cycle.cycleNumber}. New Winner: ${plan.newWinnerShare.memberName}.`, 'sync');
   };
 
   // Phase 13: Cryptographically Verified Member Portal Retrieval
   const getShareByPortalToken = async (token: string): Promise<{ share: Share; fund: Fund; payments: Payment[] } | null> => {
-    if (!token) return null;
-
-    if (token === 'demo' && import.meta.env.DEV && shares.length > 0) {
-      return {
-        share: shares[0],
-        fund: activeFund || funds[0],
-        payments: payments.filter((p) => p.shareId === shares[0]?.shareId),
-      };
-    }
-
-    if (token.trim().length < 8) return null;
+    if (!token || token.trim().length < 8) return null;
 
     try {
       // 1. Validate token record from Firestore portal_tokens
@@ -2866,7 +2897,12 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
       const snap = await getDocs(q);
       const items: Payment[] = [];
-      snap.forEach((d) => items.push({ ...d.data(), paymentId: d.id } as Payment));
+      snap.forEach((d) => {
+        const itemData = d.data();
+        delete (itemData as any).cycleNumber;
+        delete (itemData as any).allocations;
+        items.push({ ...itemData, paymentId: d.id } as Payment);
+      });
       items.sort((a, b) => new Date(b.paymentDate || b.createdAt).getTime() - new Date(a.paymentDate || a.createdAt).getTime());
       const nextCursor = snap.docs.length >= pageSize ? snap.docs[snap.docs.length - 1] : null;
       return {
@@ -2923,19 +2959,25 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const createContact = async (contact: Omit<Contact, 'contactId' | 'managerId' | 'createdAt' | 'updatedAt'>): Promise<string> => {
     if (!managerId || !authUid) throw new Error('Not authenticated');
     
-    // Normalize phone number
+    // Normalize phone number before identity check
     const normPhone = normalizePhoneNumber(contact.phone);
     if (!normPhone) throw new Error('Valid phone number is required.');
 
-    // Check if phone number already exists for this tenant
+    // Check if contact already exists for this tenant using normalized phone
     const existing = contacts.find(
       (c) => c.managerId === managerId && normalizePhoneNumber(c.phone) === normPhone
     );
+    
     if (existing) {
-      throw new Error('A contact with this phone number already exists.');
+      // REQ 2: Treat as an update/upsert of the existing Contact
+      await updateContact(existing.contactId, {
+        ...contact,
+        phone: normPhone // Ensure phone is normalized in the update
+      });
+      return existing.contactId;
     }
 
-    // Normalized phone number is the unique identifier
+    // REQ 1 & 3: Normalized phone number is the unique and stable identifier
     const contactId = normPhone;
     const newContact: Contact = {
       ...contact,
@@ -2950,7 +2992,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       await setDoc(doc(db, 'contacts', contactId), newContact);
     } catch (e) {
       await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
+        operationId: `create_contact_${contactId}`, // Deterministic operationId (Phase 2A.5)
         managerId,
         authUid,
         collection: 'contacts',
@@ -2961,7 +3003,10 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setPendingOfflineCount((prev) => prev + 1);
     }
     await localDb.put(managerId, 'contacts', newContact);
-    setContacts((prev) => [newContact, ...prev]);
+    setContacts((prev) => {
+      const filtered = prev.filter(c => c.contactId !== contactId);
+      return [newContact, ...filtered];
+    });
     return contactId;
   };
 
@@ -2981,15 +3026,20 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const normNewPhone = normalizePhoneNumber(data.phone);
       if (!normNewPhone) throw new Error('Valid phone number is required.');
 
-      // Check if another contact for this tenant already has this phone number
-      const duplicate = contacts.find(
-        (c) => c.contactId !== contactId && c.managerId === managerId && normalizePhoneNumber(c.phone) === normNewPhone
-      );
-      if (duplicate) {
-        throw new Error('A contact with this phone number already exists.');
+      if (normNewPhone !== existing.contactId) {
+        // REQ 4: If the phone number changes, check for collisions
+        const duplicate = contacts.find(
+          (c) => c.contactId !== contactId && c.managerId === managerId && normalizePhoneNumber(c.phone) === normNewPhone
+        );
+        if (duplicate) {
+          throw new Error('This phone number already belongs to another contact.');
+        }
+        updatedPhone = normNewPhone;
+        targetContactId = normNewPhone;
+      } else {
+        // Phone changed in format but same normalized identity
+        updatedPhone = normNewPhone;
       }
-      updatedPhone = normNewPhone;
-      targetContactId = normNewPhone;
     }
 
     const updatedContact: Contact = {
@@ -3011,19 +3061,19 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         // Update any groups containing the old contact ID
         for (const g of groups) {
-          if (g.memberIds && g.memberIds.includes(contactId)) {
-            const newMemberIds = g.memberIds.map((id) => (id === contactId ? targetContactId : id));
+          if (g.contactIds && g.contactIds.includes(contactId)) {
+            const newContactIds = g.contactIds.map((id) => (id === contactId ? targetContactId : id));
             await updateDoc(doc(db, 'groups', g.groupId), { 
-              memberIds: newMemberIds, 
+              contactIds: newContactIds, 
               updatedAt: new Date().toISOString() 
             });
-            await localDb.put(managerId, 'groups', { ...g, memberIds: newMemberIds, updatedAt: new Date().toISOString() });
+            await localDb.put(managerId, 'groups', { ...g, contactIds: newContactIds, updatedAt: new Date().toISOString() });
           }
         }
         setGroups((prev) =>
           prev.map((g) =>
-            g.memberIds && g.memberIds.includes(contactId)
-              ? { ...g, memberIds: g.memberIds.map((id) => (id === contactId ? targetContactId : id)) }
+            g.contactIds && g.contactIds.includes(contactId)
+              ? { ...g, contactIds: g.contactIds.map((id) => (id === contactId ? targetContactId : id)) }
               : g
           )
         );
@@ -3032,7 +3082,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     } catch (e) {
       await localDb.queueOfflineMutation({
-        operationId: FinancialEngine.generateCryptoToken(),
+        operationId: `update_contact_${targetContactId}`, // Deterministic operationId (Phase 2A.5)
         managerId,
         authUid,
         collection: 'contacts',
@@ -3044,7 +3094,11 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     await localDb.put(managerId, 'contacts', updatedContact);
-    setContacts((prev) => prev.map((c) => (c.contactId === contactId ? updatedContact : c)));
+    setContacts((prev) => {
+      // Remove both old and new IDs to be absolutely safe against duplicates
+      const filtered = prev.filter(c => c.contactId !== contactId && c.contactId !== targetContactId);
+      return [updatedContact, ...filtered];
+    });
   };
 
   // Phase 15: Safe CRM Contact Deletion
@@ -3087,30 +3141,30 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     // Remove contact from any group memberships
     for (const g of groups) {
-      if (g.memberIds && g.memberIds.includes(contactId)) {
-        const newMemberIds = g.memberIds.filter((id) => id !== contactId);
+      if (g.contactIds && g.contactIds.includes(contactId)) {
+        const newContactIds = g.contactIds.filter((id) => id !== contactId);
         try {
           await updateDoc(doc(db, 'groups', g.groupId), { 
-            memberIds: newMemberIds, 
+            contactIds: newContactIds, 
             updatedAt: new Date().toISOString() 
           });
         } catch (err) {
           console.warn('Notice updating group after contact deletion:', err);
         }
-        await localDb.put(managerId, 'groups', { ...g, memberIds: newMemberIds });
+        await localDb.put(managerId, 'groups', { ...g, contactIds: newContactIds });
       }
     }
     setGroups((prev) =>
       prev.map((g) =>
-        g.memberIds && g.memberIds.includes(contactId)
-          ? { ...g, memberIds: g.memberIds.filter((id) => id !== contactId) }
+        g.contactIds && g.contactIds.includes(contactId)
+          ? { ...g, contactIds: g.contactIds.filter((id) => id !== contactId) }
           : g
       )
     );
   };
 
   // Phase 15: CRM Group Creation
-  const createGroup = async (name: string, description: string, memberIds: string[] = []): Promise<string> => {
+  const createGroup = async (name: string, description: string, contactIds: string[] = []): Promise<string> => {
     if (!managerId || !authUid) throw new Error('Not authenticated');
     const groupId = FinancialEngine.generateCryptoToken();
     const displayId = generateUniqueGroupDisplayId();
@@ -3120,7 +3174,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       managerId,
       name: name.trim(),
       description: description.trim(),
-      memberIds,
+      contactIds,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -3139,7 +3193,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setPendingOfflineCount((prev) => prev + 1);
     }
     await localDb.put(managerId, 'groups', newGroup);
-    setGroups((prev) => [newGroup, ...prev]);
+    setGroups((prev) => [newGroup, ...prev.filter((g) => g.groupId !== newGroup.groupId)]);
     return groupId;
   };
 
@@ -3203,20 +3257,20 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   // Phase 15: CRM Group Membership Update (Add / Remove contacts)
-  const updateGroupMembers = async (groupId: string, memberIds: string[]): Promise<void> => {
+  const updateGroupMembers = async (groupId: string, contactIds: string[]): Promise<void> => {
     if (!managerId || !authUid) throw new Error('Not authenticated');
     const existing = groups.find((g) => g.groupId === groupId && g.managerId === managerId);
     if (!existing) throw new Error('Group not found');
 
     const updatedGroup: Group = {
       ...existing,
-      memberIds,
+      contactIds,
       updatedAt: new Date().toISOString(),
     };
 
     try {
       await updateDoc(doc(db, 'groups', groupId), {
-        memberIds,
+        contactIds,
         updatedAt: updatedGroup.updatedAt,
       });
     } catch (e) {
@@ -3291,7 +3345,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setPendingOfflineCount((prev) => prev + 1);
     }
     await localDb.put(managerId, 'campaigns', newCampaign);
-    setCampaigns((prev) => [newCampaign, ...prev]);
+    setCampaigns((prev) => [newCampaign, ...prev.filter((c) => c.campaignId !== newCampaign.campaignId)]);
 
     // Dispatch ONE centralized webhook trigger for campaign_launch to n8n
     try {
@@ -3349,7 +3403,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       memberName: trimmedName,
       memberPhone: trimmedPhone,
       contactId: data.contactId || targetShare.contactId,
-      memberId: data.contactId || targetShare.memberId,
       updatedAt: now,
     };
 
@@ -3360,7 +3413,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         memberName: trimmedName,
         memberPhone: trimmedPhone,
         contactId: data.contactId || targetShare.contactId || null,
-        memberId: data.contactId || targetShare.memberId,
         updatedAt: now,
       });
 
@@ -3425,10 +3477,13 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const deleteCurrentCycle = async (fundId: string, cycleId: string) => {
-    if (!managerId) throw new Error('Unauthenticated tenant');
+    if (!managerId || !authUid) throw new Error('Unauthenticated tenant');
 
-    const fundCycles = cycles.filter((c) => c.fundId === fundId);
-    if (fundCycles.length === 0) throw new Error('No cycles found for this Chitti');
+    const fund = funds.find((f) => f.fundId === fundId);
+    if (!fund) throw new Error('Fund scheme not found');
+
+    const fundCycles = cycles.filter((c) => c.fundId === fundId).sort((a, b) => a.cycleNumber - b.cycleNumber);
+    if (fundCycles.length === 0) throw new Error('No cycles found for this Fund');
 
     const maxCycleNumber = Math.max(...fundCycles.map((c) => c.cycleNumber));
     const targetCycle = fundCycles.find((c) => c.cycleId === cycleId || c.cycleNumber === maxCycleNumber);
@@ -3440,50 +3495,246 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       throw new Error(`Security Policy: Only the current/latest cycle (Cycle #${maxCycleNumber}) can be deleted. Historical cycles (Cycle #${targetCycle.cycleNumber}) are locked to preserve financial integrity.`);
     }
 
-    // Atomically delete target cycle and revert cycle-specific winner claims
-    const winnerShare = targetCycle.winnerShareId
-      ? shares.find((s) => s.shareId === targetCycle.winnerShareId)
-      : null;
+    const fundShares = shares.filter((s) => s.fundId === fundId);
+    const cycleBillings = billings.filter((b) => b.cycleId === targetCycle.cycleId);
+    const cyclePayouts = payouts.filter((p) => p.cycleId === targetCycle.cycleId && p.status === 'disbursed');
 
-    let updatedWinnerShare: Share | null = null;
-    if (winnerShare && winnerShare.wonMonth === targetCycle.cycleNumber) {
-      updatedWinnerShare = {
-        ...winnerShare,
-        hasClaimedPrize: false,
-        wonMonth: null,
-        status: 'undrawn',
-        updatedAt: new Date().toISOString(),
+    const now = new Date().toISOString();
+    const updatedShares: Share[] = [];
+
+    // Recalculate financial state for every share in the fund
+    for (const s of fundShares) {
+      // Recalculate financial state for every share in the fund using authoritative event stream
+      const shareBillings = billings.filter((b) => b.shareId === s.shareId && b.fundId === fundId && b.cycleId !== targetCycle.cycleId);
+      const sharePayments = payments.filter((p) => p.shareId === s.shareId);
+
+      const events: FinancialEvent[] = [
+        ...shareBillings.map(b => ({ type: 'BILLING' as const, amount: b.billAmount, timestamp: b.createdAt })),
+        ...sharePayments.map(p => ({ 
+          type: (p.type || 'CREDIT') as 'CREDIT' | 'DEBIT', 
+          amount: p.amount, 
+          timestamp: p.paymentDate 
+        }))
+      ];
+
+      const rebuiltState = UniversalFinancialCore.rebuildState(events);
+      
+      const isWinner = targetCycle.winnerShareId === s.shareId;
+      
+      const updatedShare: Share = {
+        ...s,
+        ...rebuiltState,
+        hasClaimedPrize: isWinner ? false : s.hasClaimedPrize,
+        wonCycleNumber: isWinner ? null : s.wonCycleNumber,
+        status: isWinner ? 'undrawn' : (s.status as any),
+        updatedAt: now,
+      };
+      updatedShares.push(updatedShare);
+    }
+
+    const updatedFund: Fund = {
+      ...fund,
+      currentCycle: Math.max(0, targetCycle.cycleNumber - 1),
+      updatedAt: now,
+    };
+
+    // Recalculate Materialized Ledger
+    const chittiLedger = ledgers.find((l) => l.fundId === fundId && l.ledgerType === 'CHITTI_LEDGER');
+    let updatedLedger: MaterializedLedger | null = null;
+    if (chittiLedger) {
+      const payoutSum = cyclePayouts.reduce((sum, p) => sum + p.amount, 0);
+      updatedLedger = {
+        ...chittiLedger,
+        totalDisbursed: Math.max(0, chittiLedger.totalDisbursed - payoutSum),
+        totalArrears: updatedShares.reduce((sum, s) => sum + s.arrears, 0),
+        totalCollected: updatedShares.reduce((sum, s) => sum + (s.totalCredits - s.totalDebits), 0),
+        updatedAt: now,
       };
     }
 
+    const auditId = FinancialEngine.generateCryptoToken();
+    const audit: AuditRecord = {
+      auditId,
+      managerId,
+      actorUid,
+      action: 'DELETE_CYCLE',
+      entityType: 'CYCLE',
+      entityId: cycleId,
+      timestamp: now,
+      createdAt: serverTimestamp(),
+      reason: `Deleted Cycle #${targetCycle.cycleNumber} ("${targetCycle.cycleName}"). Reconciled financial state for ${fundShares.length} shares. Removed ${cycleBillings.length} billings and cancelled ${cyclePayouts.length} payouts.`,
+    };
+
     try {
       const batch = writeBatch(db);
+      
+      // 1. Delete Cycle
       batch.delete(doc(db, 'cycles', targetCycle.cycleId));
-      if (updatedWinnerShare) {
-        batch.update(doc(db, 'shares', updatedWinnerShare.shareId), {
-          hasClaimedPrize: false,
-          wonMonth: null,
-          status: 'undrawn',
-          updatedAt: updatedWinnerShare.updatedAt,
+      
+      // 2. Delete Cycle Billings
+      for (const b of cycleBillings) {
+        batch.delete(doc(db, 'billings', b.billingId));
+      }
+      
+      // 3. Cancel Cycle Payouts
+      for (const p of cyclePayouts) {
+        batch.update(doc(db, 'payouts', p.payoutId), {
+          status: 'cancelled',
+          updatedAt: now,
+          updatedBy: authUid,
         });
       }
+      
+      // 4. Update Participating Shares
+      for (const us of updatedShares) {
+        batch.update(doc(db, 'shares', us.shareId), {
+          totalBilled: us.totalBilled,
+          arrears: us.arrears,
+          advance: us.advance,
+          hasClaimedPrize: us.hasClaimedPrize,
+          wonCycleNumber: us.wonCycleNumber,
+          status: us.status,
+          updatedAt: us.updatedAt,
+        });
+        if (us.portalToken) {
+          batch.set(doc(db, 'portal_tokens', us.portalToken), {
+            shareSnapshot: us,
+            updatedAt: now,
+          }, { merge: true });
+        }
+      }
+      
+      // 5. Update Fund currentCycle
+      batch.update(doc(db, 'funds', fundId), {
+        currentCycle: updatedFund.currentCycle,
+        updatedAt: now,
+      });
+      
+      // 6. Update Ledger
+      if (updatedLedger) {
+        batch.update(doc(db, 'ledgers', updatedLedger.ledgerId), {
+          totalDisbursed: updatedLedger.totalDisbursed,
+          totalArrears: updatedLedger.totalArrears,
+          totalCollected: updatedLedger.totalCollected,
+          updatedAt: now,
+        });
+      }
+      
+      // 7. Audit
+      batch.set(doc(db, 'audits', auditId), audit);
+
       await batch.commit();
     } catch (e) {
-      console.warn('Network cycle deletion notice:', e);
+      console.warn('Offline mode: queuing full cycle deletion batch:', e);
+      const operations: any[] = [
+        { action: 'delete', collection: 'cycles', docId: targetCycle.cycleId },
+        { 
+          action: 'update', 
+          collection: 'funds', 
+          docId: fundId, 
+          data: {
+            currentCycle: updatedFund.currentCycle,
+            updatedAt: now,
+          }
+        }
+      ];
+
+      for (const b of cycleBillings) {
+        operations.push({ action: 'delete', collection: 'billings', docId: b.billingId });
+      }
+
+      for (const p of cyclePayouts) {
+        operations.push({
+          action: 'update',
+          collection: 'payouts',
+          docId: p.payoutId,
+          data: {
+            status: 'cancelled',
+            updatedAt: now,
+            updatedBy: authUid,
+          }
+        });
+      }
+
+      for (const us of updatedShares) {
+        operations.push({
+          action: 'update',
+          collection: 'shares',
+          docId: us.shareId,
+          data: {
+            totalBilled: us.totalBilled,
+            arrears: us.arrears,
+            advance: us.advance,
+            hasClaimedPrize: us.hasClaimedPrize,
+            wonCycleNumber: us.wonCycleNumber,
+            status: us.status,
+            updatedAt: us.updatedAt,
+          }
+        });
+        if (us.portalToken) {
+          operations.push({
+            action: 'update',
+            collection: 'portal_tokens',
+            docId: us.portalToken,
+            data: {
+              shareSnapshot: us,
+              updatedAt: now,
+            }
+          });
+        }
+      }
+
+      if (updatedLedger) {
+        operations.push({
+          action: 'update',
+          collection: 'ledgers',
+          docId: updatedLedger.ledgerId,
+          data: {
+            totalDisbursed: updatedLedger.totalDisbursed,
+            totalArrears: updatedLedger.totalArrears,
+            totalCollected: updatedLedger.totalCollected,
+            updatedAt: now,
+          }
+        });
+      }
+
+      operations.push({ action: 'set', collection: 'audits', docId: auditId, data: audit });
+
+      await localDb.queueOfflineMutation({
+        operationId: `delete_cycle_${targetCycle.cycleId}`, // Deterministic operationId (Phase 2A.5)
+        managerId,
+        authUid,
+        collection: 'cycles',
+        docId: targetCycle.cycleId,
+        type: 'batch',
+        payload: { operations },
+      });
+      setPendingOfflineCount((prev) => prev + 1);
     }
 
     // Update local state
     setCycles((prev) => prev.filter((c) => c.cycleId !== targetCycle.cycleId));
-    if (updatedWinnerShare) {
-      setShares((prev) => prev.map((s) => (s.shareId === updatedWinnerShare!.shareId ? updatedWinnerShare! : s)));
+    setBillings((prev) => prev.filter((b) => b.cycleId !== targetCycle.cycleId));
+    setPayouts((prev) => prev.map((p) => p.cycleId === targetCycle.cycleId ? { ...p, status: 'cancelled', updatedAt: now, updatedBy: authUid } : p));
+    setShares((prev) => prev.map((s) => {
+      const found = updatedShares.find(us => us.shareId === s.shareId);
+      return found || s;
+    }));
+    setFunds((prev) => prev.map((f) => f.fundId === fundId ? updatedFund : f));
+    if (updatedLedger) {
+      setLedgers((prev) => prev.map((l) => l.ledgerId === updatedLedger!.ledgerId ? updatedLedger! : l));
     }
 
+    // Update local IndexedDB
     await localDb.delete(managerId, 'cycles', targetCycle.cycleId);
-    if (updatedWinnerShare) {
-      await localDb.put(managerId, 'shares', updatedWinnerShare);
-    }
+    for (const b of cycleBillings) await localDb.delete(managerId, 'billings', b.billingId);
+    for (const p of cyclePayouts) await localDb.put(managerId, 'payouts', { ...p, status: 'cancelled', updatedAt: now, updatedBy: authUid });
+    await localDb.putBatch(managerId, 'shares', updatedShares);
+    await localDb.put(managerId, 'funds', updatedFund);
+    if (updatedLedger) await localDb.put(managerId, 'ledgers', updatedLedger);
+    await localDb.put(managerId, 'audits', audit);
 
-    notificationService.send('Cycle Deleted', `Cycle #${targetCycle.cycleNumber} was removed. Active cycle reverted to Cycle #${Math.max(1, maxCycleNumber - 1)}.`, 'sync');
+    notificationService.send('Cycle Deleted', `Cycle #${targetCycle.cycleNumber} removed. Financial totals reconciled.`, 'sync');
   };
 
   const deleteFund = async (fundId: string) => {
@@ -3535,14 +3786,74 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         action: 'DELETE_CHITTI_SCHEME',
         entityType: 'FUND',
         entityId: fundId,
-        details: `Deleted Chitti scheme "${targetFund.fundName}" (${fundId}) with ${targetShares.length} shares, ${targetCycles.length} cycles, ${targetBillings.length} billings, and ${targetPayouts.length} payouts`,
+        details: `Deleted Fund scheme "${targetFund.fundName}" (${fundId}) with ${targetShares.length} shares, ${targetCycles.length} cycles, ${targetBillings.length} billings, and ${targetPayouts.length} payouts`,
         createdAt: serverTimestamp(),
       });
 
       await batch.commit();
     } catch (e) {
-      console.warn('Network deletion failed:', e);
-      throw new Error('Failed to delete scheme on server. Check network connection.');
+      console.warn('Offline mode: queuing full fund deletion batch:', e);
+      const operations: any[] = [
+        { action: 'delete', collection: 'funds', docId: fundId }
+      ];
+      targetShares.forEach((s) => operations.push({ action: 'delete', collection: 'shares', docId: s.shareId }));
+      targetCycles.forEach((c) => operations.push({ action: 'delete', collection: 'cycles', docId: c.cycleId }));
+      targetLedgers.forEach((l) => operations.push({ action: 'delete', collection: 'ledgers', docId: l.ledgerId }));
+      targetBillings.forEach((b) => operations.push({ action: 'delete', collection: 'billings', docId: b.billingId }));
+      targetPayouts.forEach((p) => operations.push({ action: 'delete', collection: 'payouts', docId: p.payoutId }));
+
+      if (targetFund.displayId && HUMAN_ID_REGEX.test(targetFund.displayId)) {
+        operations.push({
+          action: 'update',
+          collection: 'display_id_registry',
+          docId: targetFund.displayId,
+          data: {
+            status: 'RETIRED',
+            retiredAt: new Date().toISOString(),
+            retiredReason: `Deleted with Fund "${targetFund.fundName}" (${fundId})`,
+            updatedAt: new Date().toISOString(),
+          }
+        });
+      }
+      targetShares.forEach((s) => {
+        if (s.displayId && HUMAN_ID_REGEX.test(s.displayId)) {
+          operations.push({
+            action: 'update',
+            collection: 'display_id_registry',
+            docId: s.displayId,
+            data: {
+              status: 'RETIRED',
+              retiredAt: new Date().toISOString(),
+              retiredReason: `Deleted with Fund "${targetFund.fundName}" (${fundId})`,
+              updatedAt: new Date().toISOString(),
+            }
+          });
+        }
+      });
+
+      const auditId = `aud_funddel_${Date.now()}`;
+      const auditData = {
+        auditId,
+        managerId,
+        actorUid,
+        action: 'DELETE_CHITTI_SCHEME',
+        entityType: 'FUND',
+        entityId: fundId,
+        details: `Deleted Fund scheme "${targetFund.fundName}" (${fundId}) with ${targetShares.length} shares, ${targetCycles.length} cycles, ${targetBillings.length} billings, and ${targetPayouts.length} payouts`,
+        createdAt: new Date().toISOString(),
+      };
+      operations.push({ action: 'set', collection: 'audits', docId: auditId, data: auditData });
+
+      await localDb.queueOfflineMutation({
+        operationId: `delete_fund_${fundId}`,
+        managerId,
+        authUid,
+        collection: 'funds',
+        docId: fundId,
+        type: 'batch',
+        payload: { operations },
+      });
+      setPendingOfflineCount((prev) => prev + 1);
     }
 
     // Update local state
@@ -3573,7 +3884,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setActiveFundId(remainingFunds[0]?.fundId || null);
     }
 
-    notificationService.send('Scheme Deleted', `Chitti scheme "${targetFund.fundName}" has been removed.`, 'sync');
+    notificationService.send('Scheme Deleted', `Fund scheme "${targetFund.fundName}" has been removed.`, 'sync');
   };
 
   const rebuildMaterializedState = async (fundId: string): Promise<void> => {
@@ -3590,38 +3901,41 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const updatedShares: Share[] = [];
     for (const s of fundShares) {
       const shareBillings = fundBillings.filter((b) => b.shareId === s.shareId);
-      const totalBilled = shareBillings.reduce((sum, b) => sum + b.billAmount, 0);
-
       const sharePayments = fundPayments.filter((p) => p.shareId === s.shareId);
-      const totalPaid = sharePayments.reduce((sum, p) => sum + p.amount, 0);
 
-      const resolved = FinancialEngine.resolveBalance(totalBilled, totalPaid);
+      const events: FinancialEvent[] = [
+        ...shareBillings.map(b => ({ type: 'BILLING' as const, amount: b.billAmount, timestamp: b.createdAt })),
+        ...sharePayments.map(p => ({ 
+          type: (p.type || 'CREDIT') as 'CREDIT' | 'DEBIT', 
+          amount: p.amount, 
+          timestamp: p.paymentDate 
+        }))
+      ];
+
+      const rebuiltState = UniversalFinancialCore.rebuildState(events);
 
       const sharePayouts = fundPayouts.filter((p) => p.shareId === s.shareId);
       const hasClaimedPrize = sharePayouts.length > 0;
       
-      let wonMonthVal: number | null = null;
+      let wonCycleVal: number | null = null;
       if (hasClaimedPrize) {
         const earliestPayout = sharePayouts.sort((a, b) => new Date(a.payoutDate).getTime() - new Date(b.payoutDate).getTime())[0];
         const matchedC = fundCycles.find((c) => c.cycleId === earliestPayout.cycleId);
-        wonMonthVal = matchedC ? matchedC.cycleNumber : null;
+        wonCycleVal = matchedC ? matchedC.cycleNumber : null;
       }
 
       const updated: Share = {
         ...s,
-        totalBilled,
-        totalPaid,
-        arrears: resolved.arrears,
-        advance: resolved.advance,
+        ...rebuiltState,
         hasClaimedPrize,
-        wonMonth: wonMonthVal,
+        wonCycleNumber: wonCycleVal,
         status: hasClaimedPrize ? 'drawn' : 'undrawn',
         updatedAt: new Date().toISOString(),
       };
       updatedShares.push(updated);
     }
 
-    const totalCollected = updatedShares.reduce((a, s) => a + s.totalPaid, 0);
+    const totalCollected = updatedShares.reduce((a, s) => a + (s.totalCredits - s.totalDebits), 0);
     const totalDisbursed = fundPayouts.reduce((sum, p) => sum + p.amount, 0);
     const totalArrears = updatedShares.reduce((a, s) => a + s.arrears, 0);
 
@@ -3664,11 +3978,12 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       for (const s of updatedShares) {
         batch.update(doc(db, 'shares', s.shareId), {
           totalBilled: s.totalBilled,
-          totalPaid: s.totalPaid,
+          totalCredits: s.totalCredits,
+          totalDebits: s.totalDebits,
           arrears: s.arrears,
           advance: s.advance,
           hasClaimedPrize: s.hasClaimedPrize,
-          wonMonth: s.wonMonth,
+          wonCycleNumber: s.wonCycleNumber,
           status: s.status,
           updatedAt: s.updatedAt,
         });
@@ -3707,14 +4022,14 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       throw new Error('PERMISSION_DENIED: Unauthorized manager cannot edit this scheme');
     }
 
-    const plannedCyclesVal = frequency === '6-months' ? 6 : (frequency === '1-year' ? 12 : fund.totalCycles);
+    const fundTotalCycles = fund.totalCycles ?? 12;
+    const plannedCyclesVal = frequency === '6-months' ? 6 : (frequency === '1-year' ? 12 : fundTotalCycles);
 
     const updatedFund: Fund = {
       ...fund,
       fundName: name.trim(),
       cycleFrequency: frequency as any,
       totalCycles: plannedCyclesVal,
-      totalMonths: plannedCyclesVal || fund.totalMonths || 12,
       startDate: startDate || fund.startDate,
       updatedAt: new Date().toISOString(),
     };
@@ -3737,7 +4052,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         fundName: updatedFund.fundName,
         cycleFrequency: updatedFund.cycleFrequency,
         totalCycles: updatedFund.totalCycles,
-        totalMonths: updatedFund.totalMonths,
         startDate: updatedFund.startDate,
         updatedAt: updatedFund.updatedAt,
       });
@@ -3757,7 +4071,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const deleteShare = async (fundId: string, shareId: string): Promise<void> => {
     if (!managerId || !authUid) throw new Error('Not authenticated');
     const fund = funds.find((f) => f.fundId === fundId);
-    if (!fund) throw new Error('Chitti scheme not found');
+    if (!fund) throw new Error('Fund scheme not found');
 
     if (fund.managerId !== managerId) {
       throw new Error('PERMISSION_DENIED: Unauthorized manager cannot edit this scheme');
@@ -3767,7 +4081,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!share) throw new Error('Share not found');
 
     if (share.fundId !== fundId) {
-      throw new Error('Security Violation: Share does not belong to the active Chitti workspace');
+      throw new Error('Security Violation: Share does not belong to the active Fund workspace');
     }
 
     const now = new Date().toISOString();
@@ -3798,17 +4112,56 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         });
       }
 
-      const tokensRef = collection(db, 'portal_tokens');
-      const q = query(tokensRef, where('shareId', '==', shareId));
-      const qSnap = await getDocs(q);
-      qSnap.forEach((d) => {
-        batch.delete(doc(db, 'portal_tokens', d.id));
-      });
+      if (share.portalToken) {
+        batch.delete(doc(db, 'portal_tokens', share.portalToken));
+      } else {
+        // Fallback for orphans if online
+        try {
+          const tokensRef = collection(db, 'portal_tokens');
+          const q = query(tokensRef, where('shareId', '==', shareId));
+          const qSnap = await getDocs(q);
+          qSnap.forEach((d) => {
+            batch.delete(doc(db, 'portal_tokens', d.id));
+          });
+        } catch (innerE) {
+          console.warn('Could not query portal tokens for deletion (might be offline):', innerE);
+        }
+      }
 
       batch.set(doc(db, 'audits', audit.auditId), audit);
       await batch.commit();
     } catch (e) {
-      console.warn('Network share delete notice:', e);
+      console.warn('Offline mode: queuing full share deletion batch:', e);
+      const operations: any[] = [
+        { action: 'delete', collection: 'shares', docId: shareId }
+      ];
+      if (share.displayId && HUMAN_ID_REGEX.test(share.displayId)) {
+        operations.push({
+          action: 'update',
+          collection: 'display_id_registry',
+          docId: share.displayId,
+          data: {
+            status: 'RETIRED',
+            retiredReason: `Deleted Share #${share.shareNumber} from scheme ${fund.fundName}`,
+            updatedAt: now, // Offline use ISO instead of serverTimestamp
+          }
+        });
+      }
+      if (share.portalToken) {
+        operations.push({ action: 'delete', collection: 'portal_tokens', docId: share.portalToken });
+      }
+      operations.push({ action: 'set', collection: 'audits', docId: audit.auditId, data: audit });
+
+      await localDb.queueOfflineMutation({
+        operationId: FinancialEngine.generateCryptoToken(),
+        managerId,
+        authUid,
+        collection: 'shares',
+        docId: shareId,
+        type: 'batch',
+        payload: { operations },
+      });
+      setPendingOfflineCount((prev) => prev + 1);
     }
 
     setShares((prev) => prev.filter((s) => s.shareId !== shareId));
@@ -3858,7 +4211,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const updatedShare: Share = {
       ...share,
       hasClaimedPrize: !isRevoke,
-      wonMonth: isRevoke ? null : newDrawCycleNum,
+      wonCycleNumber: isRevoke ? null : newDrawCycleNum,
       status: isRevoke ? 'undrawn' : 'drawn',
       updatedAt: now,
     };
@@ -3868,7 +4221,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // a. Update Share
     batch.update(doc(db, 'shares', share.shareId), {
       hasClaimedPrize: updatedShare.hasClaimedPrize,
-      wonMonth: updatedShare.wonMonth,
+      wonCycleNumber: updatedShare.wonCycleNumber,
       status: updatedShare.status,
       updatedAt: updatedShare.updatedAt,
     });
@@ -3890,7 +4243,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         fundId: data.fundId,
         cycleId: data.newDrawCycleId,
         shareId: share.shareId,
-        memberId: share.memberId,
+        contactId: share.contactId,
         amount: data.payoutAmount,
         amountPaise: FinancialEngine.toPaise(data.payoutAmount),
         payoutDate: newDrawCycle?.auctionDate || now.split('T')[0],
@@ -3954,7 +4307,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (prevDrawCycle && prevDrawCycle.winnerShareId === share.shareId) {
       batch.update(doc(db, 'cycles', prevDrawCycle.cycleId), {
         winnerShareId: null,
-        winnerMemberId: null,
+        winnerContactId: null,
         winnerMemberName: null,
         winnerNetPayout: 0,
       });
@@ -3962,7 +4315,7 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (newDrawCycle) {
       batch.update(doc(db, 'cycles', newDrawCycle.cycleId), {
         winnerShareId: share.shareId,
-        winnerMemberId: share.memberId,
+        winnerContactId: share.contactId,
         winnerMemberName: share.memberName,
         winnerNetPayout: data.payoutAmount,
       });
@@ -4026,7 +4379,6 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         deleteGroup,
         updateGroupMembers,
         sendCampaign,
-        seedDemoDataIfEmpty,
         rebuildMaterializedState,
         getShareByPortalToken,
         fetchPaymentsPage,

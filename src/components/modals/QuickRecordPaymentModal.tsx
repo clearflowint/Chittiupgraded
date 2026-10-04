@@ -73,7 +73,6 @@ export const QuickRecordPaymentModal: React.FC<QuickRecordPaymentModalProps> = (
     const norm = normalizePhoneNumber(c.phone);
     return tenantShares.filter(s => 
       s.contactId === c.contactId ||
-      s.memberId === c.contactId ||
       (s.memberPhone && normalizePhoneNumber(s.memberPhone) === norm) ||
       s.memberName.trim().toLowerCase() === c.name.trim().toLowerCase()
     );
@@ -351,7 +350,7 @@ export const QuickRecordPaymentModal: React.FC<QuickRecordPaymentModalProps> = (
 
                           <div className="text-right shrink-0">
                             <span className="inline-block text-[11px] font-mono-nums font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200/80">
-                              {linked.length} {linked.length === 1 ? 'Share' : 'Shares'} · {linkedChittiCount} {linkedChittiCount === 1 ? 'Chitti' : 'Chittis'}
+                              {linked.length} {linked.length === 1 ? 'Share' : 'Shares'} · {linkedChittiCount} {linkedChittiCount === 1 ? 'Fund' : 'Funds'}
                             </span>
                           </div>
                         </button>
@@ -379,7 +378,7 @@ export const QuickRecordPaymentModal: React.FC<QuickRecordPaymentModalProps> = (
                     <span>{normalizePhoneNumber(selectedContact.phone)}</span>
                     <span className="text-slate-300">·</span>
                     <span className="font-semibold text-slate-700">
-                      {contactShares.length} {contactShares.length === 1 ? 'Share' : 'Shares'} · {new Set(contactShares.map(s => s.fundId)).size} Chittis
+                      {contactShares.length} {contactShares.length === 1 ? 'Share' : 'Shares'} · {new Set(contactShares.map(s => s.fundId)).size} Funds
                     </span>
                   </div>
                 </div>
@@ -413,7 +412,7 @@ export const QuickRecordPaymentModal: React.FC<QuickRecordPaymentModalProps> = (
                 <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-xs space-y-1">
                   <p className="font-bold">No active shares found for this contact.</p>
                   <p className="text-[11px] text-amber-700">
-                    To record payments, this contact must be enrolled in an active Chitti fund.
+                    To record payments, this contact must be enrolled in an active Fund.
                   </p>
                 </div>
               ) : (
@@ -446,7 +445,7 @@ export const QuickRecordPaymentModal: React.FC<QuickRecordPaymentModalProps> = (
                           <div className="space-y-0.5 min-w-0">
                             <div className="flex items-center gap-1.5">
                               <span className="font-bold text-slate-900 text-xs sm:text-sm font-sans truncate">
-                                {fund?.fundName || 'Chitti Scheme'}
+                                {fund?.fundName || 'Fund Scheme'}
                               </span>
                             </div>
                             <div className="text-[11px] font-mono-nums text-slate-500">

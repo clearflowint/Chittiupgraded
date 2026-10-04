@@ -16,7 +16,6 @@ interface LandingViewProps {
 export const LandingView: React.FC<LandingViewProps> = ({ onEnterApp }) => {
   const { 
     signInWithEmail,
-    signInWithDemoManager,
     sendPasswordReset,
   } = useAuth();
 
@@ -45,7 +44,8 @@ export const LandingView: React.FC<LandingViewProps> = ({ onEnterApp }) => {
       onEnterApp();
     } catch (err: any) {
       console.error('Email Auth Error:', err);
-      setFormError('Email or password is incorrect.');
+      const isWhitelistError = err?.message?.includes('not authorized') || err?.message?.includes('whitelist');
+      setFormError(isWhitelistError ? err.message : 'Email or password is incorrect.');
       setFormLoading(false);
     }
   };
@@ -70,16 +70,6 @@ export const LandingView: React.FC<LandingViewProps> = ({ onEnterApp }) => {
       setFormError(err?.message || 'Failed to send password reset email.');
       setFormLoading(false);
     }
-  };
-
-  const handleDemoLogin = async (name: string, email: string) => {
-    if (!import.meta.env.DEV) {
-      alert('Demo mode is strictly restricted to development environments.');
-      return;
-    }
-    setFormError(null);
-    await signInWithDemoManager(name, email, '+91 98450 12345');
-    onEnterApp();
   };
 
   return (
@@ -244,21 +234,6 @@ export const LandingView: React.FC<LandingViewProps> = ({ onEnterApp }) => {
                     Coming Soon
                   </span>
                 </div>
-
-                {/* Demo Mode for Dev */}
-                {import.meta.env.DEV && (
-                  <div className="pt-2 border-t border-slate-100 flex flex-col gap-1.5 animate-in fade-in">
-                    <span className="text-[9px] text-slate-400 font-mono-nums block text-center uppercase tracking-wider font-semibold">Dev Mode Bypass</span>
-                    <button
-                      type="button"
-                      onClick={() => handleDemoLogin('Lakshmi Finance Group', 'manager@lakshmichits.com')}
-                      className="w-full py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg font-semibold text-[10px] transition cursor-pointer flex items-center justify-center gap-1 font-mono-nums"
-                    >
-                      <Building className="w-3.5 h-3.5 text-amber-700" />
-                      <span>Launch Mock Manager (Lakshmi)</span>
-                    </button>
-                  </div>
-                )}
 
               </div>
             </div>

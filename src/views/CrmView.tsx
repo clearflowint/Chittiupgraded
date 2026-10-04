@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useChitFund } from '../context/ChitFundContext';
 import { Contact, Group, Campaign, CampaignTargetAudience, CampaignChannel } from '../types';
@@ -20,7 +20,10 @@ import {
   Edit2,
   Trash2,
   ShieldAlert,
-  Folder
+  Folder,
+  Smartphone,
+  Lock,
+  Info
 } from 'lucide-react';
 import { normalizePhoneNumber, isValidPhoneNumber } from '../utils/phone';
 
@@ -51,6 +54,204 @@ export const CrmView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'contacts' | 'groups' | 'campaigns'>('contacts');
   const [searchContact, setSearchContact] = useState('');
   const [contactFilter, setContactFilter] = useState<'ALL' | 'EXISTING_MEMBER' | 'NON_MEMBER'>('ALL');
+
+  // Android & Contact Picker API Capability Detection
+  const [isAndroid, setIsAndroid] = useState<boolean>(false);
+  const [hasContactPicker, setHasContactPicker] = useState<boolean>(false);
+  const [importingContacts, setImportingContacts] = useState<boolean>(false);
+  const [importNotice, setImportNotice] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+
+  // One-Screen Review Modal State for Imported Contacts
+  interface ImportCandidate {
+    id: string;
+    displayName: string;
+    rawPhone: string;
+    normalizedPhone: string | null;
+    email?: string;
+    isValidPhone: boolean;
+    isDuplicate: boolean;
+    existingContactName?: string;
+    selected: boolean;
+  }
+
+  const [showReviewModal, setShowReviewModal] = useState<boolean>(false);
+  const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && typeof navigator !== 'undefined') {
+      const ua = navigator.userAgent || '';
+      const isAndroidUA = /android/i.test(ua);
+      const isApiAvailable = 'contacts' in navigator && 'ContactsManager' in window;
+      setIsAndroid(isAndroidUA);
+      setHasContactPicker(isApiAvailable);
+    }
+  }, []);
+
+  const isImportEnabled = isAndroid && hasContactPicker;
+
+  // Primary Phone Selection Priority Helper Rule:
+  // 1. Indian Mobile number (10 digits starting with 6-9)
+  // 2. Any other telephone number that normalizes cleanly
+  // 3. Fallback to first non-empty phone string
+  const selectPrimaryPhoneNumber = (telField?: string[] | string): { raw: string; normalized: string | null; isValid: boolean } => {
+    if (!telField) return { raw: '', normalized: null, isValid: false };
+    const numbers = Array.isArray(telField) ? telField : [telField];
+    const cleanedList = numbers.map(n => typeof n === 'string' ? n.trim() : '').filter(Boolean);
+
+    if (cleanedList.length === 0) return { raw: '', normalized: null, isValid: false };
+
+    // Priority 1: Indian Mobile format
+    for (const num of cleanedList) {
+      const digitsOnly = num.replace(/\D/g, '');
+      const last10 = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly;
+      if (last10.length === 10 && /^[6-9]/.test(last10)) {
+        const norm = normalizePhoneNumber(num);
+        if (norm && isValidPhoneNumber(num)) {
+          return { raw: num, normalized: norm, isValid: true };
+        }
+      }
+    }
+
+    // Priority 2: Any valid telephone number
+    for (const num of cleanedList) {
+      const norm = normalizePhoneNumber(num);
+      if (norm && isValidPhoneNumber(num)) {
+        return { raw: num, normalized: norm, isValid: true };
+      }
+    }
+
+    // Priority 3: Fallback to first non-empty number
+    const first = cleanedList[0];
+    const norm = normalizePhoneNumber(first);
+    return {
+      raw: first,
+      normalized: norm,
+      isValid: Boolean(norm && isValidPhoneNumber(first)),
+    };
+  };
+
+  // Native Android Phone Contact Import Handler (Opens Contact Picker -> Parses Primary Numbers -> Shows One-Screen Review)
+  const handleImportPhoneContacts = async () => {
+    setImportNotice(null);
+
+    if (!('contacts' in navigator && 'ContactsManager' in window)) {
+      setImportNotice({
+        type: 'error',
+        message: 'Phone contact import is not supported by this browser.'
+      });
+      return;
+    }
+
+    try {
+      setImportingContacts(true);
+      const props = ['name', 'tel', 'email'];
+      const opts = { multiple: true };
+
+      const selectedContacts = await (navigator as any).contacts.select(props, opts);
+
+      if (!selectedContacts || selectedContacts.length === 0) {
+        setImportNotice({
+          type: 'info',
+          message: 'No contacts were selected.'
+        });
+        setImportingContacts(false);
+        return;
+      }
+
+      // Parse each selected contact & automatically pick ONE primary phone number
+      const candidates: ImportCandidate[] = selectedContacts.map((raw: any, index: number) => {
+        const nameStr = raw.name && raw.name.length > 0 ? raw.name[0].trim() : `Contact #${index + 1}`;
+        const emailStr = raw.email && raw.email.length > 0 ? raw.email[0].trim() : undefined;
+
+        const phoneResult = selectPrimaryPhoneNumber(raw.tel);
+
+        // Duplicate validation using normalized phone against existing CRM contacts
+        let isDup = false;
+        let existingName: string | undefined = undefined;
+
+        if (phoneResult.isValid && phoneResult.normalized) {
+          const existing = tenantContacts.find(c => normalizePhoneNumber(c.phone) === phoneResult.normalized);
+          if (existing) {
+            isDup = true;
+            existingName = existing.name;
+          }
+        }
+
+        return {
+          id: `imp_cand_${index}_${Date.now()}`,
+          displayName: nameStr,
+          rawPhone: phoneResult.raw,
+          normalizedPhone: phoneResult.normalized,
+          email: emailStr,
+          isValidPhone: phoneResult.isValid,
+          isDuplicate: isDup,
+          existingContactName: existingName,
+          // Selected by default if valid phone and not a duplicate
+          selected: phoneResult.isValid && !isDup,
+        };
+      });
+
+      setImportCandidates(candidates);
+      setShowReviewModal(true);
+
+    } catch (err: any) {
+      if (err.name !== 'InvalidStateError' && err.name !== 'AbortError') {
+        console.warn('Contact picker error:', err);
+      }
+    } finally {
+      setImportingContacts(false);
+    }
+  };
+
+  // One-Screen Confirmation Import Submission Handler
+  const handleConfirmImport = async () => {
+    const selectedToImport = importCandidates.filter(c => c.selected && c.isValidPhone);
+    if (selectedToImport.length === 0) {
+      setImportNotice({
+        type: 'info',
+        message: 'No valid contacts selected for import.'
+      });
+      setShowReviewModal(false);
+      return;
+    }
+
+    try {
+      setImportingContacts(true);
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const cand of selectedToImport) {
+        try {
+          // Reuses existing ClearFlow createContact logic & phone normalization
+          await createContact({
+            name: cand.displayName || 'Imported Contact',
+            phone: cand.normalizedPhone || cand.rawPhone,
+            email: cand.email,
+            tags: ['Non-Member'],
+            communicationStatus: 'subscribed',
+          });
+          successCount++;
+        } catch (err) {
+          failCount++;
+        }
+      }
+
+      setImportNotice({
+        type: 'success',
+        message: `Successfully imported ${successCount} contact${successCount > 1 ? 's' : ''} into CRM.${failCount > 0 ? ` (${failCount} skipped/failed)` : ''}`
+      });
+
+      setShowReviewModal(false);
+      setShowContactModal(false);
+    } catch (err: any) {
+      setImportNotice({
+        type: 'error',
+        message: 'An error occurred during contact import.'
+      });
+    } finally {
+      setImportingContacts(false);
+    }
+  };
 
   // Add Contact Form State
   const [showContactModal, setShowContactModal] = useState(false);
@@ -97,9 +298,9 @@ export const CrmView: React.FC = () => {
 
   // Launch Campaign Form State
   const [showCampaignModal, setShowCampaignModal] = useState(false);
-  const [campaignTitle, setCampaignTitle] = useState('Apex Wealth Series III - Early Invitation');
+  const [campaignTitle, setCampaignTitle] = useState('');
   const [campaignMsg, setCampaignMsg] = useState(
-    'Dear Investor, Registration for our next ₹10 Lakhs monthly Chitti pool is now open. Average monthly dividend savings: ₹4,200. Secure your share allotment today!'
+    'Dear Member, Registration for our next monthly Fund pool is now open. Secure your share allotment today!'
   );
   const [selectedChannels, setSelectedChannels] = useState<CampaignChannel[]>(['WHATSAPP']);
   const [targetAudience, setTargetAudience] = useState<string>('ALL');
@@ -136,8 +337,8 @@ export const CrmView: React.FC = () => {
 
   // Contact count helper for a specific manager-created Contact Group
   const getGroupCount = (g: Group) => {
-    if (Array.isArray(g.memberIds)) {
-      return g.memberIds.length;
+    if (Array.isArray(g.contactIds)) {
+      return g.contactIds.length;
     }
     const nameLower = g.name.toLowerCase();
     if (nameLower.includes('existing') && nameLower.includes('member')) {
@@ -236,23 +437,15 @@ export const CrmView: React.FC = () => {
       return;
     }
 
-    const normPhone = normalizePhoneNumber(newContactPhone);
     if (!isValidPhoneNumber(newContactPhone)) {
-      setContactError('Please enter a valid phone number (minimum 10 digits).');
-      return;
-    }
-
-    // Check if phone number already exists for this tenant
-    const duplicate = tenantContacts.find(c => normalizePhoneNumber(c.phone) === normPhone);
-    if (duplicate) {
-      setContactError('A contact with this phone number already exists.');
+      setContactError('Please enter a valid 10-digit Indian mobile number.');
       return;
     }
 
     try {
       await createContact({
         name: newContactName.trim(),
-        phone: normPhone,
+        phone: newContactPhone, // Pass raw phone, createContact will normalize and upsert
         email: newContactEmail.trim() || undefined,
         tags: [newContactMembership],
         communicationStatus: 'subscribed',
@@ -294,7 +487,7 @@ export const CrmView: React.FC = () => {
 
     const normPhone = normalizePhoneNumber(editContactPhone);
     if (!isValidPhoneNumber(editContactPhone)) {
-      setEditContactError('Please enter a valid phone number (minimum 10 digits).');
+      setEditContactError('Please enter a valid 10-digit Indian mobile number.');
       return;
     }
 
@@ -404,7 +597,7 @@ export const CrmView: React.FC = () => {
   // Toggle Contact in Group Member List
   const handleToggleGroupMember = async (contactId: string, add: boolean) => {
     if (!managingGroup) return;
-    const currentMembers = managingGroup.memberIds || [];
+    const currentMembers = managingGroup.contactIds || [];
     const nextMembers = add
       ? currentMembers.includes(contactId) ? currentMembers : [...currentMembers, contactId]
       : currentMembers.filter(id => id !== contactId);
@@ -412,7 +605,7 @@ export const CrmView: React.FC = () => {
     // Update local state copy immediately
     setManagingGroup({
       ...managingGroup,
-      memberIds: nextMembers,
+      contactIds: nextMembers,
     });
 
     await updateGroupMembers(managingGroup.groupId, nextMembers);
@@ -479,13 +672,46 @@ export const CrmView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {/* Android-Only Phone Contact Import Control */}
+          {isImportEnabled ? (
+            <button
+              type="button"
+              onClick={handleImportPhoneContacts}
+              disabled={importingContacts}
+              className="px-3 py-1.5 text-xs font-semibold text-emerald-950 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 transition cursor-pointer flex items-center gap-1.5 rounded-lg shadow-xs min-h-[36px]"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span>{importingContacts ? 'Importing...' : 'Import from Phone Contacts'}</span>
+            </button>
+          ) : (
+            <div className="flex flex-col items-end">
+              <button
+                type="button"
+                disabled
+                title="Use ClearFlow on an Android device to import contacts directly from your phone."
+                className="px-3 py-1.5 text-xs font-semibold text-slate-400 bg-slate-100 border border-slate-200 rounded-lg flex items-center gap-1.5 cursor-not-allowed select-none opacity-85 min-h-[36px]"
+              >
+                <Smartphone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span>Import from Phone Contacts 🔒</span>
+                <span className="text-[9px] font-bold uppercase tracking-wider bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-sans ml-0.5">
+                  Exclusive to Android
+                </span>
+              </button>
+              <span className="text-[10px] text-slate-400 mt-1 font-sans text-right max-w-[280px] leading-tight">
+                {isAndroid
+                  ? 'Phone contact import is not supported by this browser.'
+                  : 'Use ClearFlow on an Android device to import contacts directly from your phone.'}
+              </span>
+            </div>
+          )}
+
           <button
             onClick={() => {
               setContactError(null);
               setShowContactModal(true);
             }}
-            className="px-3.5 py-1.5 text-xs font-semibold text-slate-800 bg-white hover:bg-slate-50 border border-slate-300 transition cursor-pointer flex items-center gap-1.5 rounded-lg shadow-xs"
+            className="px-3.5 py-1.5 text-xs font-semibold text-slate-800 bg-white hover:bg-slate-50 border border-slate-300 transition cursor-pointer flex items-center gap-1.5 rounded-lg shadow-xs h-[36px]"
           >
             <Plus className="w-3.5 h-3.5 text-slate-600" />
             <span>Add Contact</span>
@@ -493,7 +719,7 @@ export const CrmView: React.FC = () => {
 
           <button
             onClick={() => setShowCampaignModal(true)}
-            className="px-4 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 transition cursor-pointer flex items-center gap-1.5 rounded-lg shadow-xs"
+            className="px-4 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 transition cursor-pointer flex items-center gap-1.5 rounded-lg shadow-xs h-[36px]"
           >
             <Send className="w-3.5 h-3.5 text-emerald-400" />
             <span>Launch Campaign</span>
@@ -950,6 +1176,136 @@ export const CrmView: React.FC = () => {
         </div>
       )}
 
+      {/* Modal 0: One-Screen Review Modal for Android Contact Import */}
+      {showReviewModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto font-sans">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-auto animate-in fade-in zoom-in-95 flex flex-col max-h-[85vh]">
+            
+            {/* Modal Header */}
+            <div className="bg-[#0f172a] text-white px-5 py-4 flex items-center justify-between shrink-0 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-emerald-600/30 border border-emerald-400/30 text-emerald-400 flex items-center justify-center">
+                  <Smartphone className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-mono-nums tracking-widest text-emerald-400 font-semibold block">
+                    IMPORT CONTACTS
+                  </span>
+                  <h2 className="text-sm font-bold text-white">
+                    Review Phone Contacts ({importCandidates.length})
+                  </h2>
+                </div>
+              </div>
+              <button 
+                type="button"
+                onClick={() => setShowReviewModal(false)}
+                className="text-slate-400 hover:text-white transition cursor-pointer p-1 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Review Candidate List */}
+            <div className="p-4 overflow-y-auto flex-1 space-y-2">
+              {importCandidates.length === 0 ? (
+                <div className="text-center py-8 text-xs text-slate-400 font-sans">
+                  No contacts were selected from phone book.
+                </div>
+              ) : (
+                importCandidates.map((cand) => (
+                  <div 
+                    key={cand.id}
+                    className={`flex items-start gap-3 p-3 rounded-xl border transition ${
+                      cand.selected 
+                        ? 'bg-emerald-50/60 border-emerald-300' 
+                        : 'bg-slate-50/70 border-slate-200'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      disabled={!cand.isValidPhone}
+                      checked={cand.selected}
+                      onChange={(e) => {
+                        setImportCandidates(prev => 
+                          prev.map(c => c.id === cand.id ? { ...c, selected: e.target.checked } : c)
+                        );
+                      }}
+                      className="mt-0.5 w-4 h-4 rounded border-slate-300 text-emerald-700 focus:ring-emerald-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                    />
+
+                    <div className="flex-1 min-w-0 font-sans">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-slate-900 truncate">
+                          {cand.displayName}
+                        </span>
+
+                        {cand.isDuplicate && (
+                          <span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md border border-amber-200 shrink-0 flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3 text-amber-600" /> Already exists
+                          </span>
+                        )}
+
+                        {!cand.isValidPhone && (
+                          <span className="text-[10px] font-bold text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md border border-rose-200 shrink-0 flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3 text-rose-600" /> Cannot import
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="text-xs font-semibold text-slate-700 font-mono-nums mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        {cand.normalizedPhone ? (
+                          <span>{cand.normalizedPhone}</span>
+                        ) : (
+                          <span className="text-rose-600 font-sans text-[11px] font-normal">
+                            No valid phone number found
+                          </span>
+                        )}
+                        {cand.email && (
+                          <span className="text-slate-400 font-sans text-[11px] truncate">
+                            · {cand.email}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between shrink-0 font-sans">
+              <span className="text-xs font-bold text-slate-600 font-mono-nums">
+                {importCandidates.filter(c => c.selected).length} contact{importCandidates.filter(c => c.selected).length === 1 ? '' : 's'} selected
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowReviewModal(false)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-300 rounded-xl transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="button"
+                  disabled={importingContacts || importCandidates.filter(c => c.selected).length === 0}
+                  onClick={handleConfirmImport}
+                  className="px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl transition cursor-pointer shadow-xs flex items-center gap-1.5 min-h-[38px]"
+                >
+                  {importingContacts ? (
+                    <span>Importing...</span>
+                  ) : (
+                    <span>Confirm &amp; Import ({importCandidates.filter(c => c.selected).length})</span>
+                  )}
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
       {/* Modal 1: Add Contact (Normalized Phone Unique ID) */}
       {showContactModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
@@ -978,6 +1334,63 @@ export const CrmView: React.FC = () => {
             </div>
 
             <form onSubmit={handleCreateContact} className="p-5 space-y-4">
+              {/* Android Phone Contacts Banner */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2 font-sans">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Smartphone className={`w-4 h-4 ${isImportEnabled ? 'text-emerald-600' : 'text-slate-400'}`} />
+                    <span className="text-xs font-bold text-slate-900">Import from Phone Contacts</span>
+                  </div>
+                  {!isImportEnabled && (
+                    <span className="text-[9px] font-bold uppercase tracking-wider bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-sans shrink-0">
+                      Exclusive to Android
+                    </span>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  {isImportEnabled
+                    ? 'Select contacts directly from your Android phone address book to import into CRM.'
+                    : isAndroid
+                    ? 'Phone contact import is not supported by this browser.'
+                    : 'Use ClearFlow on an Android device to import contacts directly from your phone.'}
+                </p>
+
+                {isImportEnabled ? (
+                  <button
+                    type="button"
+                    onClick={handleImportPhoneContacts}
+                    disabled={importingContacts}
+                    className="w-full py-2 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs min-h-[38px]"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-emerald-200" />
+                    <span>{importingContacts ? 'Opening Phone Contacts...' : 'Import from Phone Contacts'}</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    className="w-full py-2 px-3 rounded-lg bg-slate-100 border border-slate-200 text-slate-400 font-bold text-xs flex items-center justify-center gap-1.5 cursor-not-allowed select-none opacity-80 min-h-[38px]"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Import from Phone Contacts 🔒</span>
+                  </button>
+                )}
+              </div>
+
+              {importNotice && (
+                <div className={`p-3 rounded-xl text-xs flex items-center justify-between gap-2 border ${
+                  importNotice.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-800 font-medium' :
+                  importNotice.type === 'error' ? 'bg-rose-50 border-rose-200 text-rose-800 font-medium' :
+                  'bg-slate-50 border-slate-200 text-slate-700'
+                }`}>
+                  <span>{importNotice.message}</span>
+                  <button type="button" onClick={() => setImportNotice(null)} className="p-0.5 text-slate-400 hover:text-slate-600">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
               {contactError && (
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2 animate-in fade-in">
                   <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
@@ -1037,48 +1450,12 @@ export const CrmView: React.FC = () => {
                 />
               </div>
 
-              {/* Membership Classification */}
-              <div>
-                <label className="block text-[10px] font-bold text-sky-700 uppercase tracking-widest mb-1.5 ml-1">
-                  Membership Classification *
-                </label>
-                <div className="grid grid-cols-2 gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setNewContactMembership('Existing Member')}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between min-h-[48px] ${
-                      newContactMembership === 'Existing Member'
-                        ? 'border-2 border-emerald-600 bg-emerald-50/80 text-emerald-950 font-semibold shadow-xs'
-                        : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <UserCheck className={`w-4 h-4 ${newContactMembership === 'Existing Member' ? 'text-emerald-600' : 'text-slate-400'}`} />
-                      <span className="text-xs font-sans font-medium">Existing Member</span>
-                    </div>
-                    {newContactMembership === 'Existing Member' && (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setNewContactMembership('Non-Member')}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between min-h-[48px] ${
-                      newContactMembership === 'Non-Member'
-                        ? 'border-2 border-emerald-600 bg-emerald-50/80 text-emerald-950 font-semibold shadow-xs'
-                        : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <User className={`w-4 h-4 ${newContactMembership === 'Non-Member' ? 'text-emerald-600' : 'text-slate-400'}`} />
-                      <span className="text-xs font-sans font-medium">Non-Member</span>
-                    </div>
-                    {newContactMembership === 'Non-Member' && (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    )}
-                  </button>
-                </div>
+              {/* Automatic System Membership Classification Notice */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-[11px] text-slate-500 font-sans space-y-1">
+                <span className="font-bold text-slate-800 block text-xs">System Classification: Non-Member</span>
+                <p className="leading-relaxed">
+                  New CRM contacts start as Non-Members automatically and qualify as Existing Members once allotted a Fund Share.
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100">
@@ -1091,7 +1468,8 @@ export const CrmView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="py-2.5 rounded-xl text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 transition cursor-pointer shadow-xs min-h-[44px]"
+                  disabled={!newContactName.trim() || !isValidPhoneNumber(newContactPhone)}
+                  className="py-2.5 rounded-xl text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer shadow-xs min-h-[44px]"
                 >
                   Save Contact
                 </button>
@@ -1239,7 +1617,8 @@ export const CrmView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="py-2.5 rounded-xl text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 transition cursor-pointer shadow-xs min-h-[44px]"
+                  disabled={!editContactName.trim() || !isValidPhoneNumber(editContactPhone)}
+                  className="py-2.5 rounded-xl text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer shadow-xs min-h-[44px]"
                 >
                   Save Changes
                 </button>
@@ -1578,7 +1957,7 @@ export const CrmView: React.FC = () => {
                     CONTACT GROUP: {managingGroup.name}
                   </span>
                   <h2 className="text-sm font-bold text-white">
-                    Members ({managingGroup.memberIds?.length || 0})
+                    Members ({managingGroup.contactIds?.length || 0})
                   </h2>
                 </div>
               </div>
@@ -1611,7 +1990,7 @@ export const CrmView: React.FC = () => {
                     return c.name.toLowerCase().includes(q) || c.phone.includes(q) || norm.includes(q);
                   })
                   .map((c) => {
-                    const isMember = (managingGroup.memberIds || []).includes(c.contactId);
+                    const isMember = (managingGroup.contactIds || []).includes(c.contactId);
                     const normPhone = normalizePhoneNumber(c.phone);
                     const isExisting = isExistingMember(c);
                     return (
@@ -1672,7 +2051,7 @@ export const CrmView: React.FC = () => {
 
               <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
                 <span className="text-xs font-mono-nums text-slate-500">
-                  Total in group: <strong className="text-slate-900">{managingGroup.memberIds?.length || 0}</strong>
+                  Total in group: <strong className="text-slate-900">{managingGroup.contactIds?.length || 0}</strong>
                 </span>
                 <button
                   type="button"
@@ -1724,7 +2103,7 @@ export const CrmView: React.FC = () => {
                   required
                   value={campaignTitle}
                   onChange={(e) => setCampaignTitle(e.target.value)}
-                  placeholder="e.g. Apex Wealth Series III - Early Invitation"
+                  placeholder="e.g. Festival Announcement"
                   className="w-full px-3.5 py-2.5 text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-medium transition-all min-h-[44px]"
                 />
               </div>

@@ -12,7 +12,9 @@ export interface Tenant {
   phone: string;
   currency: string;
   defaultCommissionPercent: number;
+  profileCompleted?: boolean;
   createdAt: string;
+  updatedAt?: string;
   status: 'active' | 'suspended';
 }
 
@@ -36,7 +38,7 @@ export interface Group {
   managerId: string;
   name: string;
   description: string;
-  memberIds?: string[];
+  contactIds?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -64,7 +66,8 @@ export interface FinalReportSnapshot {
     status: ShareStatus;
     hasClaimedPrize: boolean;
     totalBilled: number;
-    totalPaid: number;
+    totalCredits: number;
+    totalDebits: number;
     arrears: number;
     advance: number;
   }>;
@@ -89,8 +92,8 @@ export interface Fund {
   totalPool: number; // in Rupees
   totalPoolPaise?: number; // integer minor units (100 paise = 1 Rupee)
   numberOfShares: number;
-  totalMonths: number;
-  currentMonth: number;
+  totalCycles: number;
+  currentCycle: number;
   cycleFrequency: 'monthly' | 'bi-weekly' | 'weekly';
   commissionPercent: number;
   startDate: string;
@@ -101,7 +104,6 @@ export interface Fund {
   endedByManagerId?: string | null;
   finalReportSnapshot?: FinalReportSnapshot | null;
   auctionRuleTemplate?: string;
-  totalCycles?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -111,39 +113,37 @@ export interface Share {
   displayId?: string; // 4-digit human ID (e.g. SH-0104)
   managerId: string;
   fundId: string;
-  memberId: string; // references Contact
-  contactId?: string; // Explicit reference to Contact for CRM linking
+  contactId: string; // Canonical +91XXXXXXXXXX contact identifier
   memberName: string;
   memberPhone: string;
   shareNumber: number;
   shareCount: number;
   hasClaimedPrize: boolean;
+  wonCycleNumber?: number | null;
   status: ShareStatus;
-  wonMonth?: number | null;
-  wonCycleId?: string | null;
-  portalToken?: string;
   totalBilled: number;
-  totalPaid: number;
+  totalCredits: number;
+  totalDebits: number;
   arrears: number;
   advance: number;
-  notes?: string;
+  portalToken?: string; // Cryptographic 128-bit unguessable UUID for self-service portal
   createdAt: string;
   updatedAt: string;
 }
 
 export interface Cycle {
   cycleId: string;
-  fundId: string;
+  displayId?: string;
   managerId: string;
+  fundId: string;
   cycleNumber: number;
   cycleName?: string;
   startDate?: string;
   endDate?: string | null;
-  monthIndex: number;
   auctionDate: string;
   winningBidAmount: number;
   winnerShareId?: string | null;
-  winnerMemberId?: string | null;
+  winnerContactId?: string | null;
   winnerMemberName?: string | null;
   organizerCommission: number;
   dividendPool: number;
@@ -155,6 +155,7 @@ export interface Cycle {
   status: CycleStatus;
   idempotencyKey?: string;
   createdAt: string;
+  updatedAt?: string;
   finalizedAt?: string | null;
 }
 
@@ -163,11 +164,12 @@ export interface Payment {
   displayId?: string; // 4-digit human ID (e.g. PAY-9821)
   managerId: string;
   fundId: string;
-  memberId: string;
+  contactId?: string;
   memberName?: string;
   shareId: string;
   shareNumber?: number;
   amount: number;
+  type: 'CREDIT' | 'DEBIT';
   paymentDate: string;
   paymentMethod: PaymentMethod;
   reference?: string;
@@ -199,28 +201,48 @@ export interface Payout {
   fundId: string;
   cycleId: string;
   shareId: string;
-  memberId?: string;
-  memberName?: string;
-  amount: number;
-  status: 'pending' | 'disbursed' | 'cancelled';
+  contactId?: string;
+  amount: number; // in Rupees
+  amountPaise: number; // in integer Paise
   payoutDate: string;
-  paymentMethod: PaymentMethod;
+  paymentMethod?: PaymentMethod;
   reference?: string;
   notes?: string;
+  status: 'disbursed' | 'cancelled';
   createdAt: string;
+  createdBy: string;
+  updatedAt?: string;
+  updatedBy?: string;
+  idempotencyKey?: string;
 }
 
-export interface AuditLog {
-  auditId: string;
+export interface MaterializedLedger {
+  ledgerId: string;
   managerId: string;
-  action: string;
-  actorUid?: string;
-  actorName?: string;
-  entityType: 'fund' | 'share' | 'cycle' | 'billing' | 'payment' | 'payout' | 'campaign' | 'contact' | 'group' | 'auth';
-  entityId: string;
-  metadata?: Record<string, any>;
-  createdAt: string;
+  fundId?: string;
+  ledgerType: 'CHITTI_LEDGER' | 'MANAGER_LEDGER';
+  totalPool: number;
+  totalCollected: number;
+  totalDisbursed: number;
+  totalArrears: number;
+  activeChittiCount?: number;
+  totalMembers?: number;
+  updatedAt: string;
 }
+
+export interface PortalTokenRecord {
+  token: string;
+  managerId: string;
+  fundId: string;
+  shareId: string;
+  memberName: string;
+  shareNumber: number;
+  createdAt: string;
+  expiresAt?: string;
+}
+
+export type CampaignTargetAudience = 'ALL' | 'MEMBERS' | 'NON_MEMBERS';
+export type CampaignChannel = 'WHATSAPP' | 'SMS' | 'EMAIL';
 
 export interface Campaign {
   campaignId: string;
@@ -229,21 +251,61 @@ export interface Campaign {
   fundId?: string;
   title: string;
   message: string;
-  channels: string[];
+  channels: CampaignChannel[];
   channel?: string;
   targetGroupIds?: string[];
-  targetAudience?: string;
+  targetAudience?: CampaignTargetAudience;
   recipientCount: number;
   status: CampaignStatus;
   createdAt: string;
 }
 
-export interface AcknowledgementState {
-  isOpen: boolean;
-  isSuccess: boolean;
-  title: string;
-  message: string;
-  operationType: string;
-  referenceId: string;
-  ackTime: string;
+export interface AuditRecord {
+  auditId: string;
+  managerId: string;
+  actorUid: string;
+  action: string;
+  entityType: 'FUND' | 'CYCLE' | 'SHARE' | 'PAYMENT' | 'DRAW' | 'CONTACT';
+  entityId: string;
+  timestamp: string;
+  createdAt?: any;
+  reason?: string;
+  beforeState?: string;
+  afterState?: string;
+  operationId?: string;
+  
+  // Draw Operation Specifics
+  fundId?: string;
+  shareId?: string;
+  previousDrawStatus?: string;
+  newDrawStatus?: string;
+  previousDrawCycleId?: string | null;
+  newDrawCycleId?: string | null;
+  previousPayoutAmount?: number;
+  newPayoutAmount?: number;
+  billingChanges?: string;
+  affectedCycles?: string;
+  operationType?: string;
 }
+
+export interface PaginatedResult<T> {
+  items: T[];
+  nextCursorDoc: any;
+  hasMore: boolean;
+}
+
+export interface ImpactAnalysisResult {
+  conflictingShare?: Share | null;
+  affectedCycles: number[];
+  grossInstallment: number;
+  oldDividendPerShare: number;
+  newDividendPerShare: number;
+  oldNetPayable: number;
+  newNetPayable: number;
+  netVariancePerShare: number;
+  affectedShareCount: number;
+  canProceed: boolean;
+  warnings: string[];
+}
+
+export * from './communication';

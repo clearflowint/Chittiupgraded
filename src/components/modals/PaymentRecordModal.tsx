@@ -43,7 +43,7 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
   const shareDisplayId = currentShare?.displayId || '----';
 
   const currentTotalBilled = currentShare?.totalBilled || 0;
-  const currentTotalPaid = currentShare?.totalPaid || 0;
+  const netCredits = (currentShare?.totalCredits || 0) - (currentShare?.totalDebits || 0);
   const currentArrears = currentShare?.arrears || 0;
   const currentAdvance = currentShare?.advance || 0;
 
@@ -62,18 +62,19 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
     setError(null);
 
     try {
-      const finalAmount = recordType === 'credit' ? amount : -Math.abs(amount);
+      const type = recordType.toUpperCase() as 'CREDIT' | 'DEBIT';
       const idempotencyKey = `pay_${fund.fundId}_${selectedShareId}_${Date.now()}`;
-      const finalReference = reference || `${recordType.toUpperCase()}-${Date.now().toString().slice(-6)}`;
+      const finalReference = reference || `${type}-${Date.now().toString().slice(-6)}`;
 
       await recordPayment({
         fundId: fund.fundId,
         shareId: selectedShareId,
-        amount: finalAmount,
+        amount: Number(amount),
+        type,
         paymentMethod,
         paymentDate,
         reference: finalReference,
-        notes: `[${recordType.toUpperCase()}] Payment entry`,
+        notes: `[${type}] Payment entry`,
         idempotencyKey,
       });
 
@@ -84,7 +85,7 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
         isSuccess: true,
         title: 'Payment Successfully Recorded',
         message: 'Your payment was successfully received and updated in the ledger.',
-        operationType: `${recordType.toUpperCase()} PAYMENT`,
+        operationType: `${type} PAYMENT`,
         referenceId: finalReference,
         ackTime: new Date().toLocaleTimeString(),
       });
@@ -130,7 +131,7 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
         {/* Read-Only Context Strip */}
         <div className="bg-slate-50 border-b border-slate-200 px-5 py-3 font-mono-nums text-[10px] text-slate-600 flex flex-wrap items-center justify-between gap-2 shrink-0">
           <span><strong className="text-slate-800">Manager:</strong> {managerDisplay}</span>
-          <span><strong className="text-slate-800">Chitti:</strong> {fund.displayId || '----'}</span>
+          <span><strong className="text-slate-800">Fund:</strong> {fund.displayId || '----'}</span>
         </div>
 
         {/* Scrollable Content Body */}
@@ -279,25 +280,37 @@ export const PaymentRecordModal: React.FC<PaymentRecordModalProps> = ({
 
                 {(() => {
                   const numericAmount = Number(amount) || 0;
-                  const delta = recordType === 'credit' ? numericAmount : -numericAmount;
-                  const newTotalPaid = (currentShare?.totalPaid || 0) + delta;
-                  const resolved = FinancialEngine.resolveBalance(currentShare?.totalBilled || 0, newTotalPaid);
+                  const type = recordType.toUpperCase() as 'CREDIT' | 'DEBIT';
+                  
+                  // Use new stateful logic for projection
+                  const nextState = UniversalFinancialCore.calculateNextState(
+                    {
+                      totalBilled: currentShare.totalBilled,
+                      totalCredits: currentShare.totalCredits,
+                      totalDebits: currentShare.totalDebits,
+                      arrears: currentShare.arrears,
+                      advance: currentShare.advance
+                    },
+                    { type, amount: numericAmount }
+                  );
+
+                  const projectedNetCredits = nextState.totalCredits - nextState.totalDebits;
 
                   return (
                     <div className="space-y-2.5 pt-1 text-[11px]">
                       <div className="flex justify-between items-center text-slate-300">
                         <span className="font-sans">Projected Net Paid:</span>
                         <span className="font-bold text-white">
-                          {FinancialEngine.formatCurrency(newTotalPaid)}
+                          {FinancialEngine.formatCurrency(projectedNetCredits)}
                         </span>
                       </div>
 
                       <div className="flex justify-between items-center pt-2.5 border-t border-slate-800 font-semibold">
                         <span className="font-sans text-slate-400">Net Balance Remaining:</span>
-                        <span className={resolved.arrears > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
-                          {resolved.arrears > 0 
-                            ? `-${FinancialEngine.formatCurrency(resolved.arrears)} Arrears` 
-                            : `+${FinancialEngine.formatCurrency(resolved.advance)} Advance`}
+                        <span className={nextState.arrears > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
+                          {nextState.arrears > 0 
+                            ? `-${FinancialEngine.formatCurrency(nextState.arrears)} Arrears` 
+                            : `+${FinancialEngine.formatCurrency(nextState.advance)} Advance`}
                         </span>
                       </div>
                     </div>

@@ -6,8 +6,6 @@ import { Fund, Share, Cycle } from '../types';
 import { ChittiSwitcher } from '../components/ChittiSwitcher';
 import { MemberCard } from '../components/MemberCard';
 import { CycleCard } from '../components/CycleCard';
-import { FundCyclesView } from './FundCyclesView';
-import { FundLedgerView } from './FundLedgerView';
 import { TreasuryView } from './TreasuryView';
 import { CrmView } from './CrmView';
 import { AuditView } from './AuditView';
@@ -18,7 +16,9 @@ import { QuickRecordPaymentModal } from '../components/modals/QuickRecordPayment
 import { ShareStatementModal } from '../components/modals/ShareStatementModal';
 import { BulkStatementModal } from '../components/modals/BulkStatementModal';
 import { CommunicationWebhookModal } from '../components/modals/CommunicationWebhookModal';
+import { ManagerProfileModal } from '../components/modals/ManagerProfileModal';
 import { CommunicationDispatcher } from '../services/communicationDispatcher';
+import { formatPhoneDisplay } from '../utils/phone';
 import { 
   Plus, 
   Gavel, 
@@ -45,7 +45,8 @@ import {
   X,
   Edit3,
   FileText,
-  Webhook
+  Webhook,
+  UserCheck
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -81,7 +82,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   initialSubTab = 'members',
   isPortfolioOverview = false,
 }) => {
-  const { tenant, signOut } = useAuth();
+  const { tenant, signOut, hasPendingSyncs } = useAuth();
   const { 
     funds, 
     shares, 
@@ -90,7 +91,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     payments, 
     activeFund, 
     setActiveFundId, 
-    seedDemoDataIfEmpty,
     endFund,
     revokeEndFund,
     updateFundMetadata,
@@ -112,6 +112,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [statementShare, setStatementShare] = useState<Share | null>(null);
   const [isBulkStatementOpen, setIsBulkStatementOpen] = useState(false);
   const [isWebhookModalOpen, setIsWebhookModalOpen] = useState(false);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+
+  const hasProfile = Boolean(
+    tenant?.name &&
+    tenant?.phone &&
+    tenant.phone.trim() !== ''
+  );
 
   // Selected Chitti Context
   const currentFund = activeFund;
@@ -216,9 +223,28 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     .filter((c) => c.isAuctionClosed && c.winnerNetPayout)
     .reduce((acc, c) => acc + (c.winnerNetPayout || 0), 0);
   const totalPortfolioBilled = shares.reduce((acc, s) => acc + (s.totalBilled || 0), 0);
-  const totalPortfolioPaid = shares.reduce((acc, s) => acc + (s.totalPaid || 0), 0);
+  const totalPortfolioPaid = shares.reduce((acc, s) => acc + ((s.totalCredits || 0) - (s.totalDebits || 0)), 0);
   const portfolioHealthRate = totalPortfolioBilled > 0 ? Math.round((totalPortfolioPaid / totalPortfolioBilled) * 100) : 100;
   const overdueMembersCount = shares.filter((s) => s.arrears > 0).length;
+
+  const handleSignOut = async () => {
+    try {
+      const pendingCount = await hasPendingSyncs();
+      if (pendingCount > 0) {
+        const confirmLogout = window.confirm(
+          `Warning: You have ${pendingCount} unsynchronized offline changes. \n\nLogging out will preserve these changes, but they will not be replayed until you sign in again. \n\nContinue with logout?`
+        );
+        if (!confirmLogout) return;
+      }
+      
+      const success = await signOut();
+      if (success) {
+        onNavigate('landing');
+      }
+    } catch (e) {
+      console.error('Logout failed:', e);
+    }
+  };
 
   // ----------------------------------------------------
   // MODE 1: Top-Level Manager Dashboard Portfolio Router (Section 2)
@@ -229,6 +255,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
     return (
       <div className="space-y-6 pb-20">
+        {/* Profile Incomplete Notification Banner */}
+        {!hasProfile && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-amber-200 animate-in fade-in shadow-xs">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                <UserCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-xs sm:text-sm font-bold text-amber-300 font-sans">
+                  Complete Your Manager Profile
+                </h3>
+                <p className="text-[11px] text-amber-200/80 font-sans">
+                  Please set your manager name and 10-digit mobile number for official fund communications.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsProfileModalOpen(true)}
+              className="px-4 py-2 rounded-xl text-xs font-bold text-slate-900 bg-amber-400 hover:bg-amber-300 transition cursor-pointer shrink-0 shadow-xs"
+            >
+              Complete Profile
+            </button>
+          </div>
+        )}
+
         {/* 1. Manager Dashboard Card with Heading and 4 manager level ledger values */}
         <div className="bg-[#0f172a] text-white border border-slate-800 rounded-2xl p-3.5 sm:p-4.5 shadow-md space-y-3.5">
           <div className="flex items-center justify-between gap-3 border-b border-slate-800/60 pb-3">
@@ -285,7 +337,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <CreditCard className="w-4 h-4 text-emerald-600 shrink-0" />
                 <h4 className="text-xs font-bold text-slate-900 font-sans truncate">Collect Member Payment</h4>
               </div>
-              <p className="text-[10px] text-slate-500 font-sans truncate">Record installment without opening a Chitti.</p>
+              <p className="text-[10px] text-slate-500 font-sans truncate">Record installment without opening a Fund.</p>
             </div>
             <button
               onClick={() => setIsQuickPaymentOpen(true)}
@@ -300,14 +352,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="flex items-center justify-between bg-white border border-slate-200 rounded-2xl p-3.5 shadow-2xs">
             <div className="space-y-0.5 min-w-0 pr-2">
               <h4 className="text-xs font-bold text-slate-900 font-sans truncate">Launch New Scheme</h4>
-              <p className="text-[10px] text-slate-500 font-sans truncate">Create a tenant-isolated Chitti workspace.</p>
+              <p className="text-[10px] text-slate-500 font-sans truncate">Create a tenant-isolated Fund workspace.</p>
             </div>
             <button
               onClick={onOpenNewFundModal}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-[#0284c7] hover:bg-[#0369a1] text-white transition cursor-pointer shadow-xs min-h-[38px] whitespace-nowrap shrink-0"
             >
               <Plus className="w-3.5 h-3.5 text-white shrink-0" />
-              <span>+ New Chitti</span>
+              <span>+ New Fund</span>
             </button>
           </div>
         </div>
@@ -315,13 +367,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         {/* 3. Chitti workspaces listing */}
         <div className="space-y-3">
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 font-sans pl-1">
-            Chitti Workspaces
+            Fund Workspaces
           </h2>
           
           {activeFunds.length === 0 ? (
             <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-6 text-center">
-              <span className="text-xs font-bold text-slate-500 font-sans block">No Active Chittis</span>
-              <p className="text-[11px] text-slate-400 font-sans mt-1">Initialize your first Chitti scheme above.</p>
+              <span className="text-xs font-bold text-slate-500 font-sans block">No Active Funds</span>
+              <p className="text-[11px] text-slate-400 font-sans mt-1">Initialize your first Fund scheme above.</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
@@ -364,10 +416,68 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <CrmView />
         </div>
 
+        {/* Manager Profile Section */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-3 font-sans">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-sky-50 border border-sky-200 flex items-center justify-center text-sky-600">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">System Administration</span>
+                <h3 className="text-xs font-bold text-slate-900">Manager Profile</h3>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsProfileModalOpen(true)}
+              className="px-3.5 py-1.5 bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-800 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shadow-2xs"
+            >
+              <Edit3 className="w-3.5 h-3.5 text-sky-600" />
+              <span>{hasProfile ? 'Edit Profile' : 'Add Profile'}</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono-nums">
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+              <span className="text-[9px] text-slate-400 uppercase block tracking-wider font-sans font-semibold">Manager Name</span>
+              <span className="font-bold text-slate-800 font-sans text-xs truncate block mt-0.5">
+                {tenant?.name ? tenant.name : (
+                  <span className="text-amber-600 font-normal italic font-sans">Not set</span>
+                )}
+              </span>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+              <span className="text-[9px] text-slate-400 uppercase block tracking-wider font-sans font-semibold">Manager Phone</span>
+              <span className="font-bold text-slate-800 text-xs truncate block mt-0.5">
+                {tenant?.phone && tenant.phone.trim() !== '' ? (
+                  formatPhoneDisplay(tenant.phone)
+                ) : (
+                  <span className="text-amber-600 font-normal italic font-sans">Not set</span>
+                )}
+              </span>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+              <span className="text-[9px] text-slate-400 uppercase block tracking-wider font-sans font-semibold">Manager Email</span>
+              <span className="font-medium text-slate-600 text-xs truncate block mt-0.5 lowercase font-mono">
+                {tenant?.email || '—'}
+              </span>
+            </div>
+          </div>
+        </div>
+
         {/* Operational Modal: Quick Record Payment Shortcut */}
         <QuickRecordPaymentModal
           isOpen={isQuickPaymentOpen}
           onClose={() => setIsQuickPaymentOpen(false)}
+        />
+
+        {/* Manager Profile Modal */}
+        <ManagerProfileModal
+          isOpen={isProfileModalOpen}
+          onClose={() => setIsProfileModalOpen(false)}
         />
       </div>
     );
@@ -385,10 +495,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
         <div className="space-y-1.5 max-w-md">
           <h2 className="text-xl font-bold font-serif text-slate-900">
-            Chitti Not Found
+            Fund Not Found
           </h2>
           <p className="text-xs text-slate-500 leading-relaxed font-mono-nums">
-            The requested Chitti does not exist or you don't have access to it.
+            The requested Fund does not exist or you don't have access to it.
           </p>
         </div>
         <button
@@ -408,6 +518,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   return (
     <div className="space-y-6 pb-20">
       
+      {/* ACTIVE FUND WORKSPACE IDENTITY HEADER */}
+      <div className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-2xs font-sans">
+        <h1 className="text-lg font-black text-slate-900 tracking-tight font-sans leading-snug">
+          {currentFund.fundName}
+        </h1>
+        <div className="text-xs font-semibold text-slate-500 font-mono-nums mt-0.5 flex items-center gap-1">
+          <span>Fund ID:</span>
+          <span className="font-bold text-slate-700 font-mono bg-slate-100 px-1.5 py-0.5 rounded text-[11px] border border-slate-200/60">
+            {currentFund.displayId || '----'}
+          </span>
+        </div>
+      </div>
+
       {/* GLOBAL CHITTI KPIS - MOVED ABOVE CYCLE CONTEXT */}
       <div className="grid grid-cols-3 gap-2 px-0.5">
         <div className="bg-white border border-slate-200 rounded-2xl px-2 py-3.5 text-center shadow-xs">
@@ -454,7 +577,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               onClick={onOpenCreateCycleModal}
               className="py-3 px-6 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-black text-xs shadow-md transition cursor-pointer min-h-[44px]"
             >
-              + Initialize Month #1 Cycle
+              + Initialize Cycle #1
             </button>
           </div>
         ) : (
@@ -560,7 +683,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 No Members Allotted Yet
               </span>
               <p className="text-xs text-emerald-700 max-w-sm mx-auto leading-relaxed font-sans">
-                Add your first member to start operating this Chitti and managing monthly billing allotments!
+                Add your first member to start operating this Fund and managing cycle billing allotments!
               </p>
               <button
                 onClick={() => setIsAddMemberOpen(true)}
@@ -657,7 +780,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="flex items-center gap-2 text-slate-700 min-w-0">
             <Edit3 className="w-4 h-4 text-sky-600 shrink-0" />
             <div className="min-w-0">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Chitti Identity / Frequency</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Fund Identity &amp; Frequency</span>
               <span className="text-xs font-black text-slate-900 truncate block">
                 {currentFund.fundName} · <span className="capitalize">{currentFund.cycleFrequency || 'monthly'}</span>
               </span>
@@ -694,22 +817,72 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
         </div>
 
-        {/* Chitti Ledger */}
-        <div className="pt-2">
-          <FundLedgerView fund={currentFund} onNavigate={onNavigate} onDeleteChitti={onOpenDeleteChittiModal} />
+        {/* Manager Profile Section */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-3 font-sans">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-sky-50 border border-sky-200 flex items-center justify-center text-sky-600">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">System Administration</span>
+                <h3 className="text-xs font-bold text-slate-900">Manager Profile</h3>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsProfileModalOpen(true)}
+              className="px-3.5 py-1.5 bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-800 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shadow-2xs"
+            >
+              <Edit3 className="w-3.5 h-3.5 text-sky-600" />
+              <span>{hasProfile ? 'Edit Profile' : 'Add Profile'}</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono-nums">
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+              <span className="text-[9px] text-slate-400 uppercase block tracking-wider font-sans font-semibold">Manager Name</span>
+              <span className="font-bold text-slate-800 font-sans text-xs truncate block mt-0.5">
+                {tenant?.name ? tenant.name : (
+                  <span className="text-amber-600 font-normal italic font-sans">Not set</span>
+                )}
+              </span>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+              <span className="text-[9px] text-slate-400 uppercase block tracking-wider font-sans font-semibold">Manager Phone</span>
+              <span className="font-bold text-slate-800 text-xs truncate block mt-0.5">
+                {tenant?.phone && tenant.phone.trim() !== '' ? (
+                  formatPhoneDisplay(tenant.phone)
+                ) : (
+                  <span className="text-amber-600 font-normal italic font-sans">Not set</span>
+                )}
+              </span>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+              <span className="text-[9px] text-slate-400 uppercase block tracking-wider font-sans font-semibold">Manager Email</span>
+              <span className="font-medium text-slate-600 text-xs truncate block mt-0.5 lowercase font-mono">
+                {tenant?.email || '—'}
+              </span>
+            </div>
+          </div>
         </div>
 
         {/* Sign Out Button */}
         <button
-          onClick={() => {
-            signOut();
-            onNavigate('landing');
-          }}
+          onClick={handleSignOut}
           className="w-full py-3.5 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs sm:text-sm transition cursor-pointer shadow-sm"
         >
           Sign Out of Manager Session
         </button>
       </div>
+
+      {/* Manager Profile Modal */}
+      <ManagerProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
+      />
 
       {/* Modals */}
       {currentFund && (
@@ -760,7 +933,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 className="w-full px-3 py-2 text-sm font-bold border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-mono-nums transition-all"
               />
               <p className="text-[10px] text-slate-400 leading-normal ml-0.5">
-                Chitti ID: <span className="font-mono-nums font-semibold text-slate-600">{currentFund.displayId || '----'}</span> · Isolated
+                Fund ID: <span className="font-mono-nums font-semibold text-slate-600">{currentFund.displayId || '----'}</span> · Isolated
               </p>
             </div>
 

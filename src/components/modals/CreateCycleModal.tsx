@@ -134,15 +134,24 @@ export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({
 
   // --- CLASSIFICATION LOGIC (Relative to activeCycleNum) ---
   const group1Shares = useMemo(() => {
-    return fundShares.filter((s) => s.hasClaimedPrize && s.wonMonth !== null && s.wonMonth !== undefined && s.wonMonth < activeCycleNum);
+    return fundShares.filter((s) => {
+      const wonNum = s.wonCycleNumber;
+      return s.hasClaimedPrize && wonNum !== null && wonNum !== undefined && wonNum < activeCycleNum;
+    });
   }, [fundShares, activeCycleNum]);
 
   const group2Shares = useMemo(() => {
-    return fundShares.filter((s) => s.hasClaimedPrize && s.wonMonth !== null && s.wonMonth !== undefined && s.wonMonth === activeCycleNum);
+    return fundShares.filter((s) => {
+      const wonNum = s.wonCycleNumber;
+      return s.hasClaimedPrize && wonNum !== null && wonNum !== undefined && wonNum === activeCycleNum;
+    });
   }, [fundShares, activeCycleNum]);
 
   const group3Shares = useMemo(() => {
-    return fundShares.filter((s) => !s.hasClaimedPrize || s.wonMonth === null || s.wonMonth === undefined || s.wonMonth > activeCycleNum);
+    return fundShares.filter((s) => {
+      const wonNum = s.wonCycleNumber;
+      return !s.hasClaimedPrize || wonNum === null || wonNum === undefined || wonNum > activeCycleNum;
+    });
   }, [fundShares, activeCycleNum]);
 
   const totalCycleBill = useMemo(() => {
@@ -223,11 +232,11 @@ export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({
 
       showAcknowledgement({
         isSuccess: true,
-        title: activeCycle ? 'Cycle Records Updated' : 'Chitti Cycle Initialized',
+        title: activeCycle ? 'Cycle Records Updated' : 'Fund Cycle Initialized',
         message: activeCycle 
           ? `Successfully updated individual bills and metadata for Cycle #${activeCycle.cycleNumber}.`
           : `Cycle #${nextCycleNum} ("${cycleName}") and individual Share bills have been successfully persisted.`,
-        operationType: activeCycle ? 'UPDATE CYCLE BILLS' : 'CREATE CHITTI CYCLE',
+        operationType: activeCycle ? 'UPDATE CYCLE BILLS' : 'CREATE FUND CYCLE',
         referenceId: cycleIdResult || `CY-OP-${Date.now().toString().slice(-6)}`,
         ackTime: new Date().toLocaleTimeString(),
       });
@@ -303,7 +312,7 @@ export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({
                     >
                       {fundCycles.map((c) => (
                         <option key={c.cycleId} value={c.cycleId}>
-                          Cycle #{c.cycleNumber} — {c.cycleName || `Month #${c.cycleNumber}`} ({c.startDate})
+                          Cycle #{c.cycleNumber} — {c.cycleName || `Cycle #${c.cycleNumber}`} ({c.startDate})
                         </option>
                       ))}
                     </select>
@@ -444,7 +453,7 @@ export const CreateCycleModal: React.FC<CreateCycleModalProps> = ({
                             <span className="font-black text-slate-800 truncate">{s.memberName}</span>
                           </div>
                           <span className="text-[9px] font-bold text-emerald-600 block mt-1 uppercase tracking-tighter bg-emerald-50 w-fit px-1 rounded">
-                            WON CYCLE #{s.wonMonth}
+                            WON CYCLE #{s.wonCycleNumber}
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0 font-mono-nums">

@@ -22,7 +22,10 @@ export const DrawEntryModal: React.FC<DrawEntryModalProps> = ({
 }) => {
   const { finalizeCycleSettlement } = useChitFund();
 
-  const [selectedCycleNumber, setSelectedCycleNumber] = useState<number>(fund.currentMonth);
+  const fundCycles = cycles.filter((c) => c.fundId === fund.fundId).sort((a, b) => a.cycleNumber - b.cycleNumber);
+  const highestCycleNum = fundCycles.length > 0 ? fundCycles[fundCycles.length - 1].cycleNumber : 1;
+
+  const [selectedCycleNumber, setSelectedCycleNumber] = useState<number>(highestCycleNum);
   const [selectedShareId, setSelectedShareId] = useState<string>(shares[0]?.shareId || '');
   const [winningBidAmount, setWinningBidAmount] = useState<number>(85000);
   const [loading, setLoading] = useState(false);
@@ -35,14 +38,13 @@ export const DrawEntryModal: React.FC<DrawEntryModalProps> = ({
     managerId: fund.managerId,
     fundId: fund.fundId,
     cycleNumber: selectedCycleNumber,
-    monthIndex: selectedCycleNumber,
     auctionDate: new Date().toISOString(),
     winningBidAmount: 0,
     organizerCommission: fund.totalPool * (fund.commissionPercent / 100),
     dividendPool: 0,
     dividendPerShare: 0,
-    grossInstallment: Math.round(fund.totalPool / fund.totalMonths),
-    netInstallmentDue: Math.round(fund.totalPool / fund.totalMonths),
+    grossInstallment: Math.round(fund.totalPool / fund.totalCycles),
+    netInstallmentDue: Math.round(fund.totalPool / fund.totalCycles),
     winnerNetPayout: fund.totalPool,
     isAuctionClosed: false,
     status: 'bidding' as const,
@@ -126,16 +128,16 @@ export const DrawEntryModal: React.FC<DrawEntryModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
-                  Target Cycle (Month #)
+                  Target Cycle (#)
                 </label>
                 <select
                   value={selectedCycleNumber}
                   onChange={(e) => setSelectedCycleNumber(Number(e.target.value))}
                   className="w-full px-4 py-3 text-base sm:text-sm border border-slate-200 bg-slate-50 focus:bg-white rounded-xl focus:outline-none focus:border-sky-500 font-mono-nums font-medium transition-all bg-white"
                 >
-                  {Array.from({ length: fund.totalMonths }, (_, i) => i + 1).map((m) => (
+                  {(fundCycles.length > 0 ? fundCycles.map(c => c.cycleNumber) : [1]).map((m) => (
                     <option key={m} value={m}>
-                      Month #{m} {m === fund.currentMonth ? '(Current)' : ''}
+                      Cycle #{m} {m === highestCycleNum ? '(Current)' : ''}
                     </option>
                   ))}
                 </select>
@@ -168,7 +170,7 @@ export const DrawEntryModal: React.FC<DrawEntryModalProps> = ({
               >
                 {shares.map((s) => (
                   <option key={s.shareId} value={s.shareId}>
-                    Share #{s.shareNumber} · {s.memberName} {s.hasClaimedPrize ? `(Won M#${s.wonMonth})` : '(Eligible)'}
+                    Share #{s.shareNumber} · {s.memberName} {s.hasClaimedPrize ? `(Won Cycle #${s.wonCycleNumber})` : '(Eligible)'}
                   </option>
                 ))}
               </select>

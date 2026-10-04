@@ -35,7 +35,7 @@ export const RecordPayoutModal: React.FC<RecordPayoutModalProps> = ({
 
   useEffect(() => {
     if (isOpen && fundCycles.length > 0) {
-      const matchCycle = fundCycles.find((c) => c.cycleNumber === (share.wonMonth || maxCycle)) || fundCycles[0];
+      const matchCycle = fundCycles.find((c) => c.cycleNumber === (share.wonCycleNumber || maxCycle)) || fundCycles[0];
       setSelectedCycleId(matchCycle.cycleId);
       setPayoutAmount(matchCycle.winnerNetPayout || fund.totalPool || 800000);
       setPayoutDate(new Date().toISOString().split('T')[0]);
@@ -145,7 +145,7 @@ export const RecordPayoutModal: React.FC<RecordPayoutModalProps> = ({
               </span>
             </div>
             <span className="text-[11px] text-slate-500 font-sans block">
-              Phone: {share.memberPhone} · Status: {share.hasClaimedPrize ? `Drawn (Month #${share.wonMonth})` : 'Undrawn'}
+              Phone: {share.memberPhone} · Status: {share.hasClaimedPrize ? `Drawn (Cycle #${share.wonCycleNumber})` : 'Undrawn'}
             </span>
           </div>
 

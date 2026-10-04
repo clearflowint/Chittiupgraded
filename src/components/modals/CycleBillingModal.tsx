@@ -89,7 +89,7 @@ export const CycleBillingModal: React.FC<CycleBillingModalProps> = ({
       showAcknowledgement({
         isSuccess: true,
         title: 'Billing Reconciled Successfully',
-        message: `Successfully finalized and materialized billing of ₹${netInstallmentDue} per share for Month #${cycle.cycleNumber}.`,
+        message: `Successfully finalized and materialized billing of ₹${netInstallmentDue} per share for Cycle #${cycle.cycleNumber}.`,
         operationType: 'FINALIZE CYCLE BILLINGS',
         referenceId: `CY-BILL-${cycle.cycleNumber}-${Date.now().toString().slice(-6)}`,
         ackTime: new Date().toLocaleTimeString(),

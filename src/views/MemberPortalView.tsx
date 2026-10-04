@@ -27,7 +27,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({ token, onBac
 
   useEffect(() => {
     async function verifyAndLoad() {
-      if (!token || (token !== 'demo' && token.trim().length < 8)) {
+      if (!token || token.trim().length < 8) {
         setAuthError('Authentication Error: Missing or invalid cryptographic passbook token.');
         setLoading(false);
         return;
@@ -139,12 +139,12 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({ token, onBac
           <div className="text-left sm:text-right">
             <span className="text-xs font-serif font-bold text-slate-900 block">{fund.fundName}</span>
             <span className="text-xs font-mono-nums text-slate-500 block">
-              Scheme Pool: {FinancialEngine.formatCurrency(fund.totalPool)} ({fund.totalMonths} Months)
+              Scheme Pool: {FinancialEngine.formatCurrency(fund.totalPool)} ({fund.totalCycles} Cycles)
             </span>
             <span className={`text-[10px] font-mono-nums uppercase tracking-wider font-semibold mt-1 inline-block ${
               share.hasClaimedPrize ? 'text-emerald-800 bg-emerald-50 px-2 py-0.5 border border-emerald-200' : 'text-slate-600'
             }`}>
-              {share.hasClaimedPrize ? `Prize Awarded (Month #${share.wonMonth})` : 'Undrawn Participant'}
+              {share.hasClaimedPrize ? `Prize Awarded (Cycle #${share.wonCycleNumber})` : 'Undrawn Participant'}
             </span>
           </div>
         </div>
@@ -154,7 +154,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({ token, onBac
           <div className="bg-slate-50 border border-slate-200 p-3.5">
             <span className="text-[10px] text-slate-400 uppercase block font-sans">Total Contributed</span>
             <span className="text-base font-bold text-slate-950 mt-1 block">
-              {FinancialEngine.formatCurrency(share.totalPaid)}
+              {FinancialEngine.formatCurrency((share.totalCredits || 0) - (share.totalDebits || 0))}
             </span>
             <span className="text-[10px] text-slate-400 font-sans block mt-0.5">
               Billed: {FinancialEngine.formatCurrency(share.totalBilled)}
@@ -187,7 +187,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({ token, onBac
               {share.hasClaimedPrize ? 'Disbursed' : 'Upcoming'}
             </span>
             <span className="text-[10px] text-slate-400 font-sans block mt-0.5">
-              {share.hasClaimedPrize ? `Awarded in Month #${share.wonMonth}` : 'Eligible for next cycle'}
+              {share.hasClaimedPrize ? `Awarded in Cycle #${share.wonCycleNumber}` : 'Eligible for next cycle'}
             </span>
           </div>
         </div>
@@ -300,7 +300,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({ token, onBac
                   <span className="font-bold text-slate-900">{share.memberName}</span>
                 </div>
                 <div className="flex justify-between text-slate-600">
-                  <span className="font-sans">Chitti Scheme:</span>
+                  <span className="font-sans">Fund Scheme:</span>
                   <span className="font-bold text-slate-800">{fund.fundName}</span>
                 </div>
                 <div className="flex justify-between text-slate-600">

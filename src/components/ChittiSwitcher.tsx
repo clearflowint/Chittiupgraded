@@ -49,7 +49,7 @@ export const ChittiSwitcher: React.FC<ChittiSwitcherProps> = ({
         className="min-w-0 w-full px-2 py-2.5 rounded-xl transition cursor-pointer border border-emerald-500 bg-emerald-500 text-white hover:bg-emerald-400 hover:border-emerald-400 flex items-center justify-center gap-1.5 text-[10px] sm:text-[11px] font-black shadow-md shrink-0"
       >
         <Plus className="w-3.5 h-3.5 shrink-0 stroke-[2.5]" />
-        <span>+ New Chitti</span>
+        <span>+ New Fund</span>
       </button>
     </div>
   );

@@ -30,15 +30,15 @@ interface AuthContextType {
   tenant: Tenant | null;
   loading: boolean;
   authState: AuthState;
-  isDemoMode: boolean;
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   signUpWithEmail: (email: string, password: string) => Promise<void>;
-  signInWithDemoManager: (name: string, email: string, phone: string) => Promise<void>;
   submitAccessRequest: (phone: string) => Promise<void>;
-  signOut: () => Promise<void>;
+  signOut: (force?: boolean) => Promise<boolean>;
+  hasPendingSyncs: () => Promise<number>;
   verifyAccess: (user: User) => Promise<void>;
   sendPasswordReset: (email: string) => Promise<void>;
+  updateManagerProfile: (data: { name: string; phone: string }) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -48,7 +48,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [loading, setLoading] = useState(true);
   const [authState, setAuthState] = useState<AuthState>('AUTH_LOADING');
-  const [isDemoMode, setIsDemoMode] = useState(false);
 
   // Sync or create tenant profile from Firestore or local cache
   const syncTenantProfile = async (uid: string, fallbackName?: string, fallbackEmail?: string) => {
@@ -63,15 +62,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (tenantSnap && tenantSnap.exists()) {
         const data = tenantSnap.data() as Tenant;
-        setTenant(data);
-        await localDb.put(uid, 'app_cache', { id: 'current_tenant', ...data });
+        // Keep authoritative email updated if authenticated email is present
+        const resolvedTenant: Tenant = {
+          ...data,
+          email: fallbackEmail || data.email || `${uid}@clearflow.internal`,
+        };
+        setTenant(resolvedTenant);
+        await localDb.put(uid, 'app_cache', { id: 'current_tenant', ...resolvedTenant });
       } else {
         const newTenant: Tenant = {
           managerId: uid,
           authUid: uid,
-          name: fallbackName || 'Operations Manager',
+          name: fallbackName || '',
           email: fallbackEmail || `${uid}@clearflow.internal`,
-          phone: '+91 98450 12345',
+          phone: '',
           currency: '₹',
           defaultCommissionPercent: 5,
           createdAt: new Date().toISOString(),
@@ -95,41 +99,57 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const verifyAccess = async (user: User) => {
-    if (!user) {
+    if (!user || !user.email) {
+      setTenant(null);
       setAuthState('ACCESS_DENIED');
-      return;
+      throw new Error('Manager access not authorized. User credentials missing email.');
     }
 
-    setAuthState('AUTHORIZED');
-    const normalizedEmail = user.email ? user.email.toLowerCase().trim() : '';
-    await syncTenantProfile(user.uid, user.displayName || 'Operations Manager', normalizedEmail);
+    setAuthState('VERIFYING_CLEARFLOW_ACCESS');
+    const normalizedEmail = user.email.toLowerCase().trim();
+
+    try {
+      const whitelistRef = doc(db, 'manager_whitelist', normalizedEmail);
+      const whitelistSnap = await getDoc(whitelistRef);
+
+      if (whitelistSnap.exists() && whitelistSnap.data()?.status === 'APPROVED') {
+        setAuthState('AUTHORIZED');
+        await syncTenantProfile(user.uid, user.displayName || 'Operations Manager', normalizedEmail);
+      } else {
+        console.warn(`Manager access not authorized: ${normalizedEmail} is not on the approved whitelist.`);
+        setTenant(null);
+        setAuthState('ACCESS_DENIED');
+        throw new Error('Manager access not authorized. Your account is not on the approved manager whitelist.');
+      }
+    } catch (err: any) {
+      setTenant(null);
+      setAuthState('ACCESS_DENIED');
+      throw err;
+    }
   };
 
   useEffect(() => {
+    let isInitial = true;
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setLoading(true);
-      if (user) {
-        setIsDemoMode(false);
-        setCurrentUser(user);
-        await verifyAccess(user);
-      } else {
-        // Only allow demo manager session in DEV mode
-        const demoUid = localStorage.getItem('clearflow_demo_uid');
-        if (demoUid && import.meta.env.DEV) {
-          setIsDemoMode(true);
-          const cached = await localDb.getForTenant<Tenant>(demoUid, 'app_cache', 'current_tenant');
-          if (cached) {
-            setTenant(cached);
-          }
-          setAuthState('AUTHORIZED');
-        } else {
-          setCurrentUser(null);
-          setTenant(null);
-          setIsDemoMode(false);
-          setAuthState('ACCESS_DENIED');
-        }
+      if (isInitial) {
+        setLoading(true);
       }
-      setLoading(false);
+      if (user) {
+        setCurrentUser(user);
+        try {
+          await verifyAccess(user);
+        } catch (err) {
+          console.warn('Initial auth verification notice:', err);
+        }
+      } else {
+        setCurrentUser(null);
+        setTenant(null);
+        setAuthState('ACCESS_DENIED');
+      }
+      if (isInitial) {
+        setLoading(false);
+        isInitial = false;
+      }
     });
 
     return () => unsubscribe();
@@ -141,8 +161,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const provider = new GoogleAuthProvider();
       const result = await signInWithPopup(auth, provider);
       if (result.user) {
-        localStorage.removeItem('clearflow_demo_uid');
-        setIsDemoMode(false);
         setCurrentUser(result.user);
         await verifyAccess(result.user);
       }
@@ -202,39 +220,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthState('ACCESS_PENDING');
   };
 
-  // Development Only Demo Sign-In
-  const signInWithDemoManager = async (name: string, email: string, phone: string) => {
-    if (!import.meta.env.DEV) {
-      throw new Error('Demo Manager Mode is restricted to development environments.');
-    }
-
-    const demoUid = 'demo_' + btoa(email).replace(/[^a-zA-Z0-9]/g, '').slice(0, 16);
-    localStorage.setItem('clearflow_demo_uid', demoUid);
-    setIsDemoMode(true);
-
-    const demoTenant: Tenant = {
-      managerId: demoUid,
-      authUid: demoUid,
-      name,
-      email,
-      phone,
-      currency: '₹',
-      defaultCommissionPercent: 5,
-      createdAt: new Date().toISOString(),
-      status: 'active',
-    };
-
-    setTenant(demoTenant);
-    await localDb.put(demoUid, 'app_cache', { id: 'current_tenant', ...demoTenant });
-    setAuthState('AUTHORIZED');
+  const hasPendingSyncs = async (): Promise<number> => {
+    if (!tenant?.managerId) return 0;
+    const pending = await localDb.getPendingMutations(tenant.managerId);
+    return pending.length;
   };
 
-  const signOut = async () => {
+  const signOut = async (force = false): Promise<boolean> => {
     const prevManagerId = tenant?.managerId;
-    localStorage.removeItem('clearflow_demo_uid');
-    setIsDemoMode(false);
 
     if (prevManagerId) {
+      const pendingCount = await hasPendingSyncs();
+      if (pendingCount > 0 && !force) {
+        return false; // Indicate that logout was blocked by pending syncs
+      }
       await localDb.clearTenantCache(prevManagerId);
     }
 
@@ -246,10 +245,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCurrentUser(null);
     setTenant(null);
     setAuthState('ACCESS_DENIED');
+    return true;
   };
 
   const sendPasswordReset = async (email: string) => {
     await sendPasswordResetEmail(auth, email.trim());
+  };
+
+  const updateManagerProfile = async (data: { name: string; phone: string }) => {
+    if (!tenant) throw new Error('No active manager session found.');
+    const updatedTenant: Tenant = {
+      ...tenant,
+      name: data.name.trim(),
+      phone: data.phone.trim(),
+    };
+
+    try {
+      const tenantRef = doc(db, 'tenants', tenant.managerId);
+      await setDoc(tenantRef, updatedTenant, { merge: true });
+    } catch (err) {
+      console.warn('Network notice updating tenant profile, cached locally:', err);
+    }
+
+    setTenant(updatedTenant);
+    await localDb.put(tenant.managerId, 'app_cache', { id: 'current_tenant', ...updatedTenant });
   };
 
   return (
@@ -259,15 +278,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         tenant,
         loading: loading || authState === 'AUTH_LOADING',
         authState,
-        isDemoMode,
         signInWithGoogle,
         signInWithEmail,
         signUpWithEmail,
-        signInWithDemoManager,
         submitAccessRequest,
         signOut,
+        hasPendingSyncs,
         verifyAccess,
         sendPasswordReset,
+        updateManagerProfile,
       }}
     >
       {children}

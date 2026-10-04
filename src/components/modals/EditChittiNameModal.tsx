@@ -102,7 +102,7 @@ export const EditChittiNameModal: React.FC<EditChittiNameModalProps> = ({ isOpen
             )}
             <div>
               <h2 className="text-sm font-bold tracking-wide">
-                {step === 1 ? 'CONFIRM CHANGES' : 'EDIT CHITTI SCHEME'}
+                {step === 1 ? 'CONFIRM CHANGES' : 'EDIT FUND SCHEME'}
               </h2>
               <p className="text-[10px] text-slate-400 uppercase tracking-tight">
                 {fund.fundName} · IDENTITY
@@ -131,7 +131,7 @@ export const EditChittiNameModal: React.FC<EditChittiNameModalProps> = ({ isOpen
             <form onSubmit={handlePreSubmit} className="p-5 space-y-5 pb-24 sm:pb-5">
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
-                  Chitti / Scheme Name *
+                  Fund / Scheme Name *
                 </label>
                 <input
                   type="text"

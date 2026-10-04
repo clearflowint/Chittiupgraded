@@ -143,7 +143,7 @@ export const ShareEditBillsModal: React.FC<ShareEditBillsModalProps> = ({
                 <div>
                   <span className="font-extrabold text-slate-900 block text-sm sm:text-base">{share.memberName}</span>
                   <span className="text-[10px] text-slate-500 font-mono-nums block mt-0.5">
-                    Member ID: {share.memberId.slice(0, 10)}... · Display ID: {shareDisplayId}
+                    Contact ID: {share.contactId} · Display ID: {shareDisplayId}
                   </span>
                 </div>
                 
@@ -171,7 +171,7 @@ export const ShareEditBillsModal: React.FC<ShareEditBillsModalProps> = ({
                   <div>
                     <span className="font-bold block text-amber-950">Draw Ledger Record Found:</span>
                     <span>
-                      This member won the prize in <strong>Cycle #{share.wonMonth || 'N/A'}</strong>. 
+                      This member won the prize in <strong>Cycle #{share.wonCycleNumber || 'N/A'}</strong>. 
                       {sharePayout && (
                         <span> Disbursed payout amount of <strong>₹{sharePayout.amount.toLocaleString('en-IN')}</strong> on {sharePayout.payoutDate}.</span>
                       )}
@@ -184,7 +184,7 @@ export const ShareEditBillsModal: React.FC<ShareEditBillsModalProps> = ({
             {/* Cycles Billing List */}
             <div className="space-y-2">
               <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 block ml-1">
-                Historical Billing Matrix (Months 1 to {fundCycles.length})
+                Historical Billing Matrix (Cycles 1 to {fundCycles.length})
               </span>
 
               {fundCycles.length === 0 ? (
@@ -279,7 +279,7 @@ export const ShareEditBillsModal: React.FC<ShareEditBillsModalProps> = ({
                   {share.hasClaimedPrize && (
                     <>
                       <div className="text-slate-500 font-medium font-sans">Drawn Details:</div>
-                      <div className="text-slate-900 font-bold text-right">Cycle #{share.wonMonth} ({FinancialEngine.formatCurrency(sharePayout?.amount || 0)})</div>
+                      <div className="text-slate-900 font-bold text-right">Cycle #{share.wonCycleNumber} ({FinancialEngine.formatCurrency(sharePayout?.amount || 0)})</div>
                     </>
                   )}
                 </div>

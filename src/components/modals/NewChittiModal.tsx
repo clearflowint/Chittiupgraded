@@ -70,7 +70,6 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
         memberList: [], // Start with 0 members
         totalPool: 0,   // Managed dynamically
         numberOfShares: 0, // Managed dynamically
-        totalMonths: plannedCyclesVal || 12, // Match metadata with selected duration
         commissionPercent: 5, // Default metadata
         totalCycles: plannedCyclesVal,
       });
@@ -105,7 +104,7 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
             )}
             <div>
               <h2 className="text-sm font-bold tracking-wide">
-                {step === 1 ? 'CONFIRM NEW CHITTI' : 'START MANAGING CHITTI'}
+                {step === 1 ? 'CONFIRM NEW FUND' : 'START MANAGING FUND'}
               </h2>
               <p className="text-[10px] text-slate-400 uppercase tracking-tight">
                 {step === 1 ? 'Verify Initial Config' : 'New Creation · Dynamic Model'}
@@ -134,7 +133,7 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
             <form onSubmit={handlePreSubmit} className="p-5 space-y-5 pb-24 sm:pb-5">
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 ml-1">
-                  Chitti / Scheme Name *
+                  Fund / Scheme Name *
                 </label>
                 <input
                   type="text"
@@ -211,7 +210,7 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
                 <div className="space-y-0.5 leading-relaxed">
                   <span className="font-bold block text-sky-950">Dynamic Operational Model</span>
                   <span>
-                    Establish Chitti identity. You can add shares/members and create cycles operationally whenever needed. Zero predefined member limits or fixed cycle counts.
+                    Establish Fund identity. You can add shares/members and create cycles operationally whenever needed. Zero predefined member limits or fixed cycle counts.
                   </span>
                 </div>
               </div>
@@ -220,7 +219,7 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
             <div className="p-5 space-y-5 animate-in slide-in-from-right-4 duration-300 pb-24 sm:pb-5">
               <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
                 <div className="bg-[#0f172a] text-white px-4 py-2.5 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
-                  CHITTI ARCHITECTURE PREVIEW
+                  FUND ARCHITECTURE PREVIEW
                 </div>
                 <div className="p-4 space-y-4">
                   <div className="space-y-3">
@@ -262,7 +261,7 @@ export const NewChittiModal: React.FC<NewChittiModalProps> = ({ isOpen, onClose,
                   onClick={handleConfirmSubmit}
                   className="py-3 rounded-xl text-xs font-black text-white bg-[#0284c7] hover:bg-[#0369a1] shadow-md transition cursor-pointer min-h-[48px] flex items-center justify-center gap-2"
                 >
-                  {loading ? 'Initializing...' : 'Yes, Launch Chitti'}
+                  {loading ? 'Initializing...' : 'Yes, Launch Fund'}
                   <Save className="w-3.5 h-3.5" />
                 </button>
               </div>
