@@ -710,6 +710,9 @@ export const CrmView: React.FC = () => {
 
           <button
             onClick={() => {
+              setNewContactName('');
+              setNewContactPhone('');
+              setNewContactEmail('');
               setContactError(null);
               setShowContactModal(true);
             }}

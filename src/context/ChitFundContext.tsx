@@ -2441,11 +2441,19 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updatedAt: new Date().toISOString(),
     };
 
-    await setDoc(doc(db, 'contacts', contactId), newContact);
-    await localDb.put(managerId, 'contacts', newContact);
+    // Remove any undefined properties (like optional email) to prevent Firestore errors
+    const cleanedContact = { ...newContact };
+    Object.keys(cleanedContact).forEach((key) => {
+      if (cleanedContact[key as keyof typeof cleanedContact] === undefined) {
+        delete cleanedContact[key as keyof typeof cleanedContact];
+      }
+    });
+
+    await setDoc(doc(db, 'contacts', contactId), cleanedContact);
+    await localDb.put(managerId, 'contacts', cleanedContact);
     setContacts((prev) => {
       const filtered = prev.filter(c => c.contactId !== contactId);
-      return [newContact, ...filtered];
+      return [cleanedContact, ...filtered];
     });
     return contactId;
   };
@@ -2492,9 +2500,17 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // Ensure displayId is removed for contacts
     delete (updatedContact as any).displayId;
 
+    // Remove any undefined properties (like optional email) to prevent Firestore errors
+    const cleanedUpdated = { ...updatedContact };
+    Object.keys(cleanedUpdated).forEach((key) => {
+      if (cleanedUpdated[key as keyof typeof cleanedUpdated] === undefined) {
+        delete cleanedUpdated[key as keyof typeof cleanedUpdated];
+      }
+    });
+
       if (targetContactId !== contactId) {
         // Phone number changed: write new doc, delete old doc
-        await setDoc(doc(db, 'contacts', targetContactId), updatedContact);
+        await setDoc(doc(db, 'contacts', targetContactId), cleanedUpdated);
         await deleteDoc(doc(db, 'contacts', contactId));
         await localDb.delete(managerId, 'contacts', contactId);
 
@@ -2517,14 +2533,14 @@ export const ChitFundProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           )
         );
       } else {
-        await setDoc(doc(db, 'contacts', contactId), updatedContact, { merge: true });
+        await setDoc(doc(db, 'contacts', contactId), cleanedUpdated, { merge: true });
       }
 
-    await localDb.put(managerId, 'contacts', updatedContact);
+    await localDb.put(managerId, 'contacts', cleanedUpdated);
     setContacts((prev) => {
       // Remove both old and new IDs to be absolutely safe against duplicates
       const filtered = prev.filter(c => c.contactId !== contactId && c.contactId !== targetContactId);
-      return [updatedContact, ...filtered];
+      return [cleanedUpdated, ...filtered];
     });
   };
 

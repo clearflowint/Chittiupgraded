@@ -18,6 +18,10 @@ export const DeleteShareModal: React.FC<DeleteShareModalProps> = ({ isOpen, onCl
   const [error, setError] = useState<string | null>(null);
   const [step, setStep] = useState<0 | 1>(0);
 
+  const [capturedMemberName, setCapturedMemberName] = useState('');
+  const [capturedShareNumber, setCapturedShareNumber] = useState<number | null>(null);
+  const [capturedBalanceText, setCapturedBalanceText] = useState('');
+
   // Lock body scroll when modal is active
   useEffect(() => {
     if (isOpen) {
@@ -35,6 +39,9 @@ export const DeleteShareModal: React.FC<DeleteShareModalProps> = ({ isOpen, onCl
       setSelectedShareId('');
       setError(null);
       setStep(0);
+      setCapturedMemberName('');
+      setCapturedShareNumber(null);
+      setCapturedBalanceText('');
     }
   }, [isOpen]);
 
